@@ -20,7 +20,8 @@ CATALOG = pathlib.Path.home() / ".config/agent-of-empires/acp_option_catalog.jso
 NOTES_LIMIT = 8000
 MEMORY_LIMIT = 6000
 JOURNAL_LIMIT = 5000
-INSTRUCTIONS_LIMIT = 6000
+INSTRUCTIONS_LIMIT = 40000   # per file; house rules are never cut silently
+HANDOFF_LIMIT = 1500         # each worker's handover kept for the rest of the job and in the journal
 INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")  # Claude reads one, Codex the other; Claudex shows both to everyone
 DECISION_TAG = "DECISION NEEDED:"
 START_TIMEOUT = 120  # seconds for a worker to start, or to accept its settings
@@ -90,6 +91,15 @@ def tail(text, limit):
     return text if len(text) <= limit else "…(earlier text trimmed)…\n" + text[-limit:]
 
 
+def repo_root(cwd):
+    try:
+        out = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=cwd, capture_output=True, text=True,
+                             timeout=10)
+        return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
+    except Exception:
+        return None
+
+
 class StepFailed(Exception):
     pass
 
@@ -117,7 +127,10 @@ class Engine:
         aoe_dir = os.environ.get("AOE_ARTIFACT_DIR")
         stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
         key = session_key or (pathlib.Path(aoe_dir).name if aoe_dir else f"terminal-{stamp}-{os.getpid()}")
-        self.root = pathlib.Path(self.cwd) / ".claudex"
+        # One brain per repository: memory and the work lock live at the repo root, wherever Claudex is
+        # started inside it. Workers still run in the folder you started in.
+        self.project_root = repo_root(self.cwd) or self.cwd
+        self.root = pathlib.Path(self.project_root) / ".claudex"
         self.project = self.root / "project"
         self.notes_dir = self.root / "sessions" / key
         self.notes = self.notes_dir / "notes.md"
@@ -189,11 +202,18 @@ class Engine:
     def _instructions(self):
         """The project's own agent instructions. Claude only reads CLAUDE.md and Codex only AGENTS.md, so both
         are shown to everyone: one set of house rules for the whole team."""
-        parts = []
-        for name in INSTRUCTION_FILES:
-            f = pathlib.Path(self.cwd) / name
-            if f.is_file():
-                parts.append(f"--- {name} ---\n{tail(f.read_text(errors='replace'), INSTRUCTIONS_LIMIT)}")
+        parts, seen = [], set()
+        for folder in dict.fromkeys([self.project_root, self.cwd]):
+            for name in INSTRUCTION_FILES:
+                f = pathlib.Path(folder) / name
+                if not f.is_file() or f.resolve() in seen:
+                    continue
+                seen.add(f.resolve())
+                text = f.read_text(errors="replace")
+                if len(text) > INSTRUCTIONS_LIMIT:   # never drop rules silently: say so, and where the rest is
+                    text = (text[:INSTRUCTIONS_LIMIT] + f"\n[… {f} continues. Read the whole file before you start; "
+                            "its rules all apply.]")
+                parts.append(f"--- {f} ---\n{text}")
         return "\n".join(parts) or "(none)"
 
     def _memory_block(self):
@@ -202,22 +222,43 @@ class Engine:
                 f"PROJECT MAP:\n{self._read(self.map, MEMORY_LIMIT)}\n\n"
                 f"PAST DECISIONS:\n{self._read(self.decisions, MEMORY_LIMIT)}\n\n"
                 f"RECENT JOBS IN THIS PROJECT (all sessions):\n{self._read(self.journal, JOURNAL_LIMIT)}\n\n"
-                f"THIS SESSION'S NOTES:\n{self._read(self.notes, NOTES_LIMIT)}")
+                f"THIS JOB SO FAR (every handover and check, never trimmed):\n{self._job_so_far()}\n\n"
+                f"THIS SESSION'S EARLIER NOTES:\n{self._read(self.notes, NOTES_LIMIT)}")
+
+    def _job_so_far(self):
+        if not self._job or not self._job["rows"]:
+            return "(nothing yet)"
+        return "\n".join(self._job_lines(self._job["rows"])) or "(nothing yet)"
+
+    @staticmethod
+    def _job_lines(rows):
+        out = []
+        for r in rows:
+            if r.get("kind") == "step":
+                files = f" (files: {', '.join(r['files'][:8])})" if r.get("files") else ""
+                out.append(f"- step {r['step']} {r['title']}: {r['agent']} {r['model']} {r['effort']}, "
+                           f"try {r['attempt']} → {r.get('verdict', r.get('stop'))}{files}")
+                if r.get("handoff"):
+                    out.append("  handover: " + r["handoff"].replace("\n", "\n  "))
+                for issue in r.get("issues") or []:
+                    out.append(f"  review asked for: {issue}")
+            elif r.get("kind") == "second_opinion":
+                out.append(f"- second opinion: {r.get('verdict')}"
+                           + "".join(f"\n  concern: {c}" for c in r.get("concerns") or []))
+            elif r.get("kind") == "final_check":
+                out.append(f"- final check: {r.get('verdict')}"
+                           + "".join(f"\n  still wrong: {x}" for x in r.get("problems") or []))
+        return out
 
     def _write_journal(self, outcome):
         """One entry per job in the project-wide journal, so other sessions (and agents) know what happened."""
-        job, self._job = self._job, None
-        if not job or self.dry_run:
+        job = self._job
+        if not job or self.dry_run or job.get("written"):
             return
         lines = [f"\n## {job['at']} · {outcome} · session {self.session_key}", f"Request: {job['request'][:300]}"]
-        for r in job["rows"]:
-            if r.get("kind") == "step":
-                files = f" (files: {', '.join(r['files'][:8])})" if r.get("files") else ""
-                lines.append(f"- step {r['step']} {r['title']}: {r['agent']} {r['model']} {r['effort']}, "
-                             f"try {r['attempt']} → {r.get('verdict', r.get('stop'))}{files}")
-            elif r.get("kind") in ("second_opinion", "final_check"):
-                lines.append(f"- {r['kind'].replace('_', ' ')}: {r.get('verdict')}")
+        lines += self._job_lines(job["rows"])
         self._append(self.journal, "\n".join(lines) + "\n")
+        job["written"] = True   # only after it's safely on disk
 
     # ---------- workers ----------
     async def child(self, name, rules):
@@ -356,6 +397,11 @@ class Engine:
             self._act(None, "stopped")
             await self.ui.say("\n\n_Stopped._\n")
             return "cancelled"
+        except Exception:
+            self.ok = False
+            self._write_journal("failed")
+            self._act(None, "stopped")
+            raise
         finally:
             self._job = None
             self._clear_our_cancel()
@@ -414,7 +460,7 @@ class Engine:
             await self.ui.say("_(Dry run: nothing was changed.)_\n")
             return "end_turn"
 
-        turn_start = gitsnap.snapshot(self.cwd)
+        turn_start = gitsnap.snapshot(self.project_root)
         if turn_start is None and self.reviews_on:
             self.ok = False
             await self.ui.say("**Stopped before any work:** couldn't take a snapshot of the project files (git failed).\n")
@@ -442,7 +488,7 @@ class Engine:
             await self.ui.plan(entries)
 
         if changed_any:
-            turn_end = gitsnap.snapshot(self.cwd)
+            turn_end = gitsnap.snapshot(self.project_root)
             if turn_end is None:
                 self.ok = False
                 await self.ui.say("**Couldn't take the final snapshot (git failed), so the final check and project "
@@ -548,7 +594,7 @@ class Engine:
             review = rules.get("review", {})
             max_attempts = int(review.get("max_attempts", 3))
             step_timeout = rules.get("limits", {}).get("step_timeout_min", 60) * 60
-            before = gitsnap.snapshot(self.cwd)
+            before = gitsnap.snapshot(self.project_root)
             if before is None and self.reviews_on:
                 raise StepFailed("couldn't take a snapshot of the project files (git failed), so the work "
                                  "couldn't be checked.")
@@ -588,7 +634,8 @@ class Engine:
                 self._append(self.notes, f"## Step {i}: {s['title']} ({agent} {model} {effort}, attempt {attempt})"
                                          f"\n{out}\n\n")
                 row = dict(kind="step", step=i, title=s["title"], agent=agent, model=model, effort=effort,
-                           attempt=attempt, secs=secs, stop=stop, browser=s["browser"])
+                           attempt=attempt, secs=secs, stop=stop, browser=s["browser"],
+                           handoff=tail(out.strip(), HANDOFF_LIMIT))
                 if stop == "cancelled" or self.cancelled:
                     self._log(**row)
                     self.cancelled = True
@@ -603,10 +650,10 @@ class Engine:
                     self._log(**row, verdict="decision_needed")
                     reason = out[out.index(DECISION_TAG):].splitlines()[0]
                     raise StepFailed(f"the worker needs a decision from you. {reason}")
-                after = gitsnap.snapshot(self.cwd)
+                after = gitsnap.snapshot(self.project_root)
                 if after is None and self.reviews_on:
                     raise StepFailed("couldn't take a snapshot of the project files after the step (git failed).")
-                diff, files, truncated = gitsnap.diff(self.cwd, before, after,
+                diff, files, truncated = gitsnap.diff(self.project_root, before, after,
                                                       int(review.get("diff_limit", 60000)))
                 if not files:
                     self._log(**row, verdict="no_changes")
@@ -672,7 +719,7 @@ class Engine:
     async def _final_check(self, text, steps, start, end, rules):
         agent, model, effort = self._lead(rules)
         try:
-            diff, files, truncated = gitsnap.diff(self.cwd, start, end, int(rules.get("review", {}).get("diff_limit", 60000)))
+            diff, files, truncated = gitsnap.diff(self.project_root, start, end, int(rules.get("review", {}).get("diff_limit", 60000)))
         except gitsnap.SnapshotError as e:
             self.ok = False
             await self.ui.say(f"**Final check couldn't run:** {e}\n")
@@ -707,7 +754,7 @@ class Engine:
     async def _update_map(self, text, start, end, rules):
         m = rules.get("memory", {}).get("map_model", {"agent": "codex", "model": "gpt-6.1-sol", "effort": "low"})
         try:
-            files = gitsnap.changed_files(self.cwd, start, end)
+            files = gitsnap.changed_files(self.project_root, start, end)
         except gitsnap.SnapshotError:
             files = []
         prompt = (
@@ -715,7 +762,8 @@ class Engine:
             "layout, key files and what they do, data/database, how it runs, tests and deploys. Keep what is "
             "still true, add what this job changed, remove what is no longer true. You may read files.\n\n"
             f"CURRENT MAP:\n{self._read(self.map, 20000)}\n\nTHIS JOB: {text[:2000]}\n"
-            f"FILES CHANGED: {', '.join(files)}\n")
+            f"FILES CHANGED: {', '.join(files)}\n\n"
+            f"SHARED PROJECT MEMORY (keep anything here that future agents need in the map):\n{self._memory_block()}\n")
         try:
             v = await headless.ask(m["agent"], self.cwd, prompt, MAP_SCHEMA, m["model"], m["effort"], 600)
         except Exception as e:

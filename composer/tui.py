@@ -30,6 +30,8 @@ from .commands import COMMANDS, expand_skill, load_skills
 from .engine import CHECKS, MODES, ROUTES
 
 PREFS = pathlib.Path.home() / ".config/claudex/ui.json"
+BLOCK_CHARS = 60_000     # one agent's run of output kept on screen
+TOTAL_CHARS = 400_000    # the whole conversation kept on screen (the full record is in .claudex)
 LAYOUTS = ["wide", "side", "focus"]
 LAYOUT_NAMES = {"wide": "monkeys on top", "side": "monkeys at the side", "focus": "just the chat"}
 
@@ -216,7 +218,10 @@ class TUI:
         self.banana = None          # (from, to, started)
         self.confetti = []
         self.scroll_back = 0
-        self.pending = None         # (future, options) when a worker asks permission
+        self.questions = []         # permission questions waiting for an answer, oldest first: (future, options)
+        self.cmd_task = None        # a running /doctor, /rules or /log
+        self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
+        self.version = 0
         self.skills = load_skills()
         self.t0 = time.time()
         self.app = None
@@ -244,10 +249,12 @@ class TUI:
     # ---------- what the engine calls ----------
     def _add(self, who, text):
         if self.blocks and self.blocks[-1]["who"] == who:
-            self.blocks[-1]["text"] += text
+            self.blocks[-1]["text"] = (self.blocks[-1]["text"] + text)[-BLOCK_CHARS:]
         else:
             self.blocks.append({"who": who, "text": text})
-        del self.blocks[:-1500]
+        while len(self.blocks) > 400 or sum(len(b["text"]) for b in self.blocks) > TOTAL_CHARS:
+            self.blocks.pop(0)
+        self.version += 1
         self._refresh()
 
     async def say(self, text):
@@ -269,26 +276,48 @@ class TUI:
     async def permission(self, params):
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
-        lines = [f"**Permission needed:** {tc.get('title') or tc.get('kind') or 'an action'}"]
-        lines += [f"  {n}. {o.get('name')}" for n, o in enumerate(opts, 1)]
-        lines.append("_Type a number and press Enter._")
-        self._add("sys", "\n" + "\n".join(lines) + "\n")
         fut = asyncio.get_running_loop().create_future()
-        self.pending = (fut, opts)
+        self.questions.append((fut, opts, tc.get("title") or tc.get("kind") or "an action"))
+        if len(self.questions) == 1:
+            self._show_question()
         try:
             return await fut
         finally:
-            self.pending = None
+            self.questions = [q for q in self.questions if q[0] is not fut]
+
+    def _show_question(self):
+        if not self.questions:
+            return
+        _, opts, title = self.questions[0]
+        lines = [f"**Permission needed:** {title}"] + [f"  {n}. {o.get('name')}" for n, o in enumerate(opts, 1)]
+        lines.append("_Type a number and press Enter._")
+        self._add("sys", "\n" + "\n".join(lines) + "\n")
+
+    def _answer(self, line):
+        fut, opts, _ = self.questions[0]
+        if not (line.isdigit() and 1 <= int(line) <= len(opts)):
+            self._add("sys", f"\n_Type a number from 1 to {len(opts)}._\n")
+            return
+        self.questions.pop(0)
+        if not fut.done():
+            fut.set_result({"outcome": {"outcome": "selected", "optionId": opts[int(line) - 1]["optionId"]}})
+        self._show_question()
+
+    def drop_questions(self):
+        """Answer every waiting question with "cancelled" (the job stopped, finished or we're leaving)."""
+        qs, self.questions = self.questions, []
+        for fut, _, _ in qs:
+            if not fut.done():
+                fut.set_result({"outcome": {"outcome": "cancelled"}})
 
     def activity(self, who, state, target=None):
-        prev = self.state
         if who in ("claude", "codex"):
             self.speaker = who
         if state == "reviewing" and target in ("claude", "codex") and self.prefs["animate"]:
             self.banana = (target, who, time.time())        # the work is tossed across to be checked
         if state == "done" and self.prefs["animate"]:
             self._burst()
-        self.state = {"who": who, "state": state, "target": target, "since": time.time(), "prev": prev}
+        self.state = {"who": who, "state": state, "target": target, "since": time.time()}
         self._refresh()
 
     def _burst(self):
@@ -409,6 +438,13 @@ class TUI:
 
     # ---------- panes ----------
     def transcript(self):
+        if self._cache[0] == self.version:
+            return self._cache[1]
+        frags = self._transcript()
+        self._cache = (self.version, frags)
+        return frags
+
+    def _transcript(self):
         frags = []
         for b in self.blocks:
             who = b["who"]
@@ -447,7 +483,7 @@ class TUI:
 
     def status(self):
         e = self.eng
-        if self.pending:
+        if self.questions:
             left = " Answer the permission question: type its number "
         elif self.busy and not self.busy.done():
             left = " Working… Ctrl-C to stop "
@@ -494,7 +530,10 @@ class TUI:
         def _(event):
             if self.busy and not self.busy.done():
                 self._add("sys", "\n_Stopping…_\n")
+                self.drop_questions()
                 self.eng.cancel()
+            elif self.cmd_task and not self.cmd_task.done():
+                self.cmd_task.cancel()
             else:
                 self.input.text = ""
 
@@ -553,12 +592,10 @@ class TUI:
         line = buff.text.strip()
         if not line:
             return False
-        if self.pending:
-            fut, opts = self.pending
-            if line.isdigit() and 1 <= int(line) <= len(opts):
-                fut.set_result({"outcome": {"outcome": "selected", "optionId": opts[int(line) - 1]["optionId"]}})
+        if self.questions:
+            self._answer(line)
             return False
-        if self.busy and not self.busy.done():
+        if (self.busy and not self.busy.done()) or (self.cmd_task and not self.cmd_task.done()):
             self._add("sys", "\n_Still working on the last one. Ctrl-C stops it._\n")
             return False
         self.scroll_back = 0
@@ -567,9 +604,10 @@ class TUI:
             if skill:
                 line = (f"@{skill[1]} " if skill[1] else "") + skill[0]
             else:
-                asyncio.ensure_future(self.command(line))
+                self.cmd_task = asyncio.ensure_future(self.command(line))
                 return False
         self.blocks.append({"who": "you", "text": line})
+        self.version += 1
         self.busy = asyncio.ensure_future(self.run(line))
         return False
 
@@ -581,6 +619,7 @@ class TUI:
             self._add("sys", f"\n**Something went wrong:** {e}\n")
             self.activity(None, "stopped")
         finally:
+            self.drop_questions()   # nothing from this job may answer later
             self._refresh()
 
     async def command(self, line):
@@ -611,9 +650,20 @@ class TUI:
             me = pathlib.Path(__file__).resolve().parent.parent / "bin/claudex"
             env = dict(os.environ, **({"CLAUDEX_RULES": os.path.abspath(e.rules_path)} if e.rules_path else {}))
             args = [str(me), cmd] + (["--cwd", e.cwd] if cmd == "log" else [])
-            out = await asyncio.get_running_loop().run_in_executor(None, lambda: subprocess.run(
-                args, capture_output=True, text=True, env=env).stdout)
-            self._add("sys", "\n" + out + "\n")
+            proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                                                        stderr=asyncio.subprocess.STDOUT, env=env,
+                                                        start_new_session=True)
+            try:
+                out, _ = await proc.communicate()
+            except asyncio.CancelledError:
+                try:
+                    os.killpg(proc.pid, 9)
+                except ProcessLookupError:
+                    pass
+                await proc.wait()
+                self._add("sys", f"\n_/{cmd} stopped._\n")
+                return
+            self._add("sys", "\n" + out.decode(errors="replace") + "\n")
         elif cmd == "memory":
             for title, path in (("Project map", e.map), ("Past decisions", e.decisions),
                                 ("Recent jobs", e.journal)):
@@ -646,6 +696,13 @@ async def run_tui(eng):
         await app.run_async()
     finally:
         ticker.cancel()
+        tui.drop_questions()
+        if tui.cmd_task and not tui.cmd_task.done():
+            tui.cmd_task.cancel()
+            try:
+                await tui.cmd_task
+            except BaseException:
+                pass
         if tui.busy and not tui.busy.done():
             eng.cancel()
             try:

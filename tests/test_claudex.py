@@ -654,3 +654,96 @@ def test_tui_permission_is_answered_by_typing_a_number(tmp_path):
         t.on_accept(type("TypedLine", (), {"text": "2"})())
         return await ask
     assert asyncio.run(go()) == {"outcome": {"outcome": "selected", "optionId": "no"}}
+
+
+# ---------- Codex's review of the shared memory and the full screen ----------
+def test_permission_questions_queue_and_cancel_cleanly(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+    opts = [{"optionId": "yes", "name": "Allow"}, {"optionId": "no", "name": "Deny"}]
+
+    async def go():
+        a = asyncio.ensure_future(t.permission({"toolCall": {"title": "first"}, "options": opts}))
+        b = asyncio.ensure_future(t.permission({"toolCall": {"title": "second"}, "options": opts}))
+        await asyncio.sleep(0)
+        t.on_accept(type("L", (), {"text": "1"})())   # answers the FIRST question
+        t.on_accept(type("L", (), {"text": "1"})())   # then the second, no crash on a double answer
+        t.on_accept(type("L", (), {"text": "2"})())   # nothing waiting: treated as a new message, not an answer
+        first, second = await a, await b
+        c = asyncio.ensure_future(t.permission({"toolCall": {"title": "third"}, "options": opts}))
+        await asyncio.sleep(0)
+        t.drop_questions()                           # Ctrl-C / job ended: nothing left to answer later
+        return first, second, await c, t.questions
+    first, second, third, left = asyncio.run(go())
+    assert first["outcome"]["optionId"] == "yes" and second["outcome"]["optionId"] == "yes"
+    assert third == {"outcome": {"outcome": "cancelled"}} and left == []
+
+
+def test_other_sessions_see_handovers_and_findings(job):
+    repo, calls, answers = job
+    answers["plan"] = [{"steps": [step(title="Migrate")], "big_decisions": [], "concern_responses": []}]
+    answers["review"] = [{"verdict": "fix", "issues": ["index missing on orders.date"], "summary": ""},
+                         {"verdict": "pass", "issues": [], "summary": "ok"}]
+    FakeChild.script = [("m.sql", "a\n", "first try"), ("m.sql", "b\n", "Done. Deploy only after the migration runs.")]
+    asyncio.run(engine.Engine(str(repo), UI(), settings={}, session_key="A").turn("add a migration"))
+    calls.clear()
+    answers["plan"] = [{"steps": [step(title="Next")], "big_decisions": [], "concern_responses": []}]
+    asyncio.run(engine.Engine(str(repo), UI(), settings={"dry_run": True}, session_key="B").turn("next"))
+    lead = [c[4] for c in calls if c[0] == "plan"][0]
+    assert "Deploy only after the migration runs" in lead and "index missing on orders.date" in lead
+
+
+def test_long_instruction_files_keep_their_opening_rules(job):
+    repo, calls, answers = job
+    (repo / "AGENTS.md").write_text("OPENING RULE: never touch prod.\n" + "filler line\n" * 6000)
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    run(repo, dry_run=True)
+    lead = [c[4] for c in calls if c[0] == "plan"][0]
+    assert "OPENING RULE: never touch prod." in lead and "Read the whole file" in lead
+
+
+def test_subfolder_shares_the_repo_brain(job):
+    repo, calls, answers = job
+    (repo / "web").mkdir()
+    e1 = engine.Engine(str(repo), UI(), session_key="a")
+    e2 = engine.Engine(str(repo / "web"), UI(), session_key="b")
+    assert e1.root == e2.root == repo / ".claudex"
+
+
+def test_crash_still_writes_the_journal(job, monkeypatch):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    FakeChild.script = [("a.py", "v\n", "made a change")]
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+
+    async def boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(engine.Engine, "_final_check", boom)
+    monkeypatch.setattr(engine.Engine, "_update_map", boom)
+    with pytest.raises(OSError):
+        run(repo)
+    j = (repo / ".claudex/project/journal.md").read_text()
+    assert "failed" in j and "made a change" in j
+
+
+def test_map_writer_gets_the_shared_memory(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("Rule for everyone.\n")
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+    FakeChild.script = [("a.py", "v\n", "HANDOVER-XYZ")]
+    run(repo)
+    m = [c[4] for c in calls if c[0] == "map"][0]
+    assert "Rule for everyone." in m and "HANDOVER-XYZ" in m
+
+
+def test_screen_memory_is_bounded(tmp_path):
+    T, t, e = _tui(tmp_path)
+
+    async def go():
+        t.activity("codex", "working")
+        for _ in range(3000):
+            await t.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "x" * 500}})
+            t.activity("codex", "working")
+    asyncio.run(go())
+    assert sum(len(b["text"]) for b in t.blocks) <= T.TOTAL_CHARS and "prev" not in t.state
