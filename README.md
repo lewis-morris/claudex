@@ -56,7 +56,8 @@ Typing `claudex` opens a full-screen app (like Claude and Codex). `claudex --pla
 
 - **Two cheeky monkeys** act out the job: Claude (coral bandana) and Codex (teal headphones) scratch their heads while the lead plans, the one working taps at a little laptop while the other watches, a banana is tossed across when work goes to the other to be checked, a thumbs-up or "!" for the review, a jump and confetti when the job's done, a droop if it stops. In between they wink, stick their tongues out and look at each other.
 - **Panes:** Conversation (who said what, coloured per agent) and Plan (each step ticks off as it's done), a box to type in and a status bar.
-- **Keys:** F2 animation on/off · F3 layout (monkeys on top / at the side / just the chat) · F4 colours (Jungle, Sunset, Daylight) · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D or /quit leave. Choices are remembered in `~/.config/claudex/ui.json`.
+- **How much monkey:** F2 steps through nine looks: playful, calm or off, each big, small (half-height monkeys with their names beside them) or tiny (one line of little faces like `(•‿•) Codex working…`). Calm keeps the monkeys moving gently but drops the banana, confetti and cheeky faces. `/anim calm small` jumps straight to one.
+- **Keys:** F2 monkeys · F3 layout (monkeys on top / at the side / just the chat) · F4 colours (Jungle, Sunset, Daylight) · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D or /quit leave. Choices are remembered in `~/.config/claudex/ui.json`.
 - When a worker asks permission, the options appear in the chat; type the number.
 - `claudex demo` still plays the earlier pretend-job preview.
 

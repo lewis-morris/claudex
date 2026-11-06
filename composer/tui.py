@@ -1,6 +1,6 @@
 """Claudex full screen: two cheeky monkeys act out the job while you chat.
 
-F2 animation on/off · F3 layout · F4 colours · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D quit.
+F2 monkeys (playful/calm/off × big/small/tiny) · F3 layout · F4 colours · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D quit.
 Built on prompt_toolkit (already installed); the monkeys are half-block pixels in 24-bit colour.
 """
 import asyncio
@@ -34,6 +34,9 @@ BLOCK_CHARS = 60_000     # one agent's run of output kept on screen
 TOTAL_CHARS = 400_000    # the whole conversation kept on screen (the full record is in .claudex)
 LAYOUTS = ["wide", "side", "focus"]
 LAYOUT_NAMES = {"wide": "monkeys on top", "side": "monkeys at the side", "focus": "just the chat"}
+STYLES = ["playful", "calm", "off"]      # how lively the monkeys are
+SIZES = ["big", "small", "tiny"]          # how much room they take
+STAGE_ROWS = {"big": 10, "small": 4, "tiny": 1}
 
 PALETTES = {
     "Jungle": {"bg": "#13201a", "panel": "#1a2a22", "edge": "#2e4a3c", "text": "#eef3e6", "dim": "#8fa597",
@@ -120,6 +123,53 @@ def monkey(kind, pose, blink=False, look=0, tail=0, face=None):
         g[6][7], g[6][8] = "S", "S"
         g[7][7], g[7][8] = "m", "m"
     for y, x in TAILS[tail % len(TAILS)]:
+        if g[y][x] == ".":
+            g[y][x] = "T"
+    return g
+
+
+MINI = [
+    "...FFFF...",
+    "..FFFFFF..",
+    ".SFSSSSFS.",
+    ".SFeSSeFS.",
+    "..FSmmSF..",
+    "...FFFF...",
+    "...S..S...",
+]
+
+
+def mini_monkey(kind, pose, blink=False, look=0, face=None, tail=0):
+    g = _grid(MINI)
+    if kind == "claude":
+        for x in range(2, 8):
+            g[1][x] = "B"
+        g[0][8] = "B"
+    else:
+        for x in range(3, 7):
+            g[0][x] = "B"
+        g[2][1] = g[3][1] = g[2][8] = g[3][8] = "B"
+    for x in (3, 6):
+        g[3][x] = "S"
+    if not blink:
+        for x in (3 + look, 6 + look):
+            if not (face == "wink" and x == 6 + look):
+                g[3][x] = "e"
+    if face == "wink":
+        g[3][6 + look] = "m"
+    if face == "tongue":
+        g[4][4], g[4][5] = "t", "t"
+    if pose == "up":
+        g[0][0], g[1][1], g[0][9], g[1][8] = "S", "F", "S", "F"
+    elif pose == "scratch":
+        g[0][8], g[1][8] = "S", "F"
+    elif pose == "droop":
+        g[4][4], g[4][5] = "S", "S"
+    elif pose in ("typeA", "typeB"):
+        for x in range(2, 8):
+            g[5][x] = "G" if x % 2 else "K"
+        g[5][1 if pose == "typeA" else 8] = "S"
+    for y, x in ((5, 8), (6, 9)) if tail else ((4, 9), (5, 9)):
         if g[y][x] == ".":
             g[y][x] = "T"
     return g
@@ -233,7 +283,9 @@ class TUI:
             p = json.loads(PREFS.read_text())
         except Exception:
             p = {}
-        return {"animate": p.get("animate", True), "layout": p.get("layout", "wide"),
+        style = p.get("style") if p.get("style") in STYLES else ("off" if p.get("animate") is False else "playful")
+        return {"style": style, "size": p.get("size") if p.get("size") in SIZES else "big",
+                "layout": p.get("layout", "wide"),
                 "palette": p.get("palette", "Jungle") if p.get("palette") in PALETTES else "Jungle"}
 
     def _save_prefs(self):
@@ -242,6 +294,33 @@ class TUI:
             PREFS.write_text(json.dumps(self.prefs))
         except Exception:
             pass
+
+    @property
+    def moving(self):
+        return self.prefs["style"] != "off"
+
+    @property
+    def playful(self):
+        return self.prefs["style"] == "playful"
+
+    def set_look(self, style=None, size=None):
+        if style in STYLES:
+            self.prefs["style"] = style
+        if size in SIZES:
+            self.prefs["size"] = size
+        if not self.playful:
+            self.banana, self.confetti = None, []
+        self._save_prefs()
+        self._refresh()
+
+    def cycle_look(self):
+        """F2: steps through all nine: playful big → small → tiny → calm big … → off tiny."""
+        combos = [(st, sz) for st in STYLES for sz in SIZES]
+        i = combos.index((self.prefs["style"], self.prefs["size"]))
+        self.set_look(*combos[(i + 1) % len(combos)])
+
+    def look_name(self):
+        return f"{self.prefs['style'].title()} · {self.prefs['size']}"
 
     @property
     def p(self):
@@ -317,9 +396,9 @@ class TUI:
     def activity(self, who, state, target=None):
         if who in ("claude", "codex"):
             self.speaker = who
-        if state == "reviewing" and target in ("claude", "codex") and self.prefs["animate"]:
+        if state == "reviewing" and target in ("claude", "codex") and self.playful:
             self.banana = (target, who, time.time())        # the work is tossed across to be checked
-        if state == "done" and self.prefs["animate"]:
+        if state == "done" and self.playful:
             self._burst()
         self.state = {"who": who, "state": state, "target": target, "since": time.time()}
         self._refresh()
@@ -334,15 +413,27 @@ class TUI:
             self.app.invalidate()
 
     # ---------- the stage ----------
+    def _clock(self):
+        t = time.time() - self.t0
+        return {"playful": t, "calm": t * 0.5, "off": 0.0}[self.prefs["style"]]
+
     def draw_stage(self, w, h):
-        p, t = self.p, (time.time() - self.t0) if self.prefs["animate"] else 0.0
+        size = self.prefs["size"]
+        if size == "tiny":
+            return self._draw_tiny(w, h)
+        if size == "small":
+            return self._draw_small(w, h)
+        return self._draw_big(w, h)
+
+    def _draw_big(self, w, h):
+        p, t = self.p, self._clock()
         cv = Canvas(w, h, p["bg"])
         ph = h * 2
         # the branch they sit under, with leaves that sway
         for x in range(w):
             cv.pixel(x, 1, p["branch"])
             if (x * 7) % 5 == 0:
-                sway = int(round(math.sin(t * 1.5 + x * 0.4))) if self.prefs["animate"] else 0
+                sway = int(round(math.sin(t * 1.5 + x * 0.4))) if self.moving else 0
                 cv.pixel(x + sway, 2, p["leaf"] if x % 2 else p["leaf2"])
                 if (x * 3) % 4 == 0:
                     cv.pixel(x + sway, 3, p["leaf2"])
@@ -353,9 +444,9 @@ class TUI:
         for kind, x in spots.items():
             pose, bob, blink, look, bubble = "idle", 0, False, 0, None
             tail = int(t * 2.5 + (0 if kind == "claude" else 1.3)) % 3
-            if self.prefs["animate"]:
+            if self.moving:
                 bob = round(math.sin(t * 2 + (0 if kind == "claude" else 1.7)) * 0.6)
-                blink = (t + (0 if kind == "claude" else 1.1)) % 3.7 < 0.18
+                blink = (time.time() + (0 if kind == "claude" else 1.1)) % 3.7 < 0.18
             other = "codex" if kind == "claude" else "claude"
             mine, who, s = st["who"] == kind, st["who"], st["state"]
             age = time.time() - st["since"]
@@ -365,7 +456,7 @@ class TUI:
             elif s == "working":
                 if mine:
                     pose = "typeA" if int(t * 8) % 2 else "typeB"
-                    bob = round(abs(math.sin(t * 9)) * -1.2) if self.prefs["animate"] else 0
+                    bob = round(abs(math.sin(t * 9)) * -1.2) if self.playful else 0
                     bubble = ("*" if int(t * 4) % 2 else "+", p[kind])
                 else:
                     look = 1 if kind == "claude" else -1             # watching the other one work
@@ -379,13 +470,13 @@ class TUI:
                 bubble = ("!", p["bad"])
             elif s == "done" and age < 4:
                 pose = "up"
-                bob = -round(abs(math.sin(t * 7)) * 3) if self.prefs["animate"] else 0
+                bob = -round(abs(math.sin(t * 7)) * 3) if self.playful else 0
                 bubble = ("♪", p["accent"])
             elif s == "stopped" and age < 6:
                 pose, bubble = "droop", ("…", p["dim"])
                 bob = 1
             face = None
-            if self.prefs["animate"] and s in ("idle", "done", "pass", "working") and not (s == "working" and mine):
+            if self.playful and s in ("idle", "done", "pass", "working") and not (s == "working" and mine):
                 mood = (int(t / 2.5) + (2 if kind == "codex" else 0)) % 7   # every so often, something cheeky
                 if mood == 1:
                     face = "wink"
@@ -400,7 +491,7 @@ class TUI:
                       "T": p["fur2"], "B": p[kind], "t": p["bad"]}
             cv.sprite(g, x, ground + bob, colors)
             if s == "working" and mine:                                # tapping away at a little laptop
-                glow = [_mix(p[kind], p["bg"], 0.15 + 0.5 * random.random()) if self.prefs["animate"]
+                glow = [_mix(p[kind], p["bg"], 0.15 + 0.5 * random.random()) if self.playful
                         else p[kind]]
                 cv.sprite([list(r) for r in LAPTOP], x, ground + 9,
                           {"L": p["edge"], "G": glow[0], "K": p["dim"]})
@@ -414,7 +505,7 @@ class TUI:
             if bubble:
                 cv.text(x + 15, (ground + bob) // 2, bubble[0], bubble[1])
         # the banana: work tossed across to be checked
-        if self.banana and self.prefs["animate"]:
+        if self.banana and self.playful:
             a, b, started = self.banana
             k = (time.time() - started) / 1.2
             if k >= 1:
@@ -425,20 +516,140 @@ class TUI:
                 y = int(ground + 4 - math.sin(k * math.pi) * (ground + 2))
                 cv.sprite([list(r) for r in BANANA], x, max(0, y), {"Y": p["banana"], "y": p["banana2"]})
         # confetti when a job is done
-        if self.confetti and self.prefs["animate"]:
-            alive = []
-            for c in self.confetti:
-                c[0] += c[2] * 0.02
-                c[1] += c[3] * 0.04
-                c[3] += 0.12
-                if 0 <= c[1] <= 1:
-                    cv.pixel(int(c[0] * w), int(c[1] * ph), c[4])
-                    alive.append(c)
-            self.confetti = alive
+        self._confetti(cv, w, ph)
         if st["state"] == "thinking" and st["who"] == "lead":
-            sp = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(t * 10) % 10] if self.prefs["animate"] else "…"
+            sp = self._spin()
             cv.text(cx - 6, max(0, h - 3), f"{sp} planning {sp}", p["accent"])
         return cv.fragments()
+
+    def _spin(self):
+        return "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * (10 if self.playful else 4)) % 10] if self.moving else "…"
+
+    def _confetti(self, cv, w, ph):
+        if not (self.confetti and self.playful):
+            return
+        alive = []
+        for c in self.confetti:
+            c[0] += c[2] * 0.02
+            c[1] += c[3] * 0.04
+            c[3] += 0.12
+            if 0 <= c[1] <= 1:
+                cv.pixel(int(c[0] * w), int(c[1] * ph), c[4])
+                alive.append(c)
+        self.confetti = alive
+
+    def _mood(self, kind):
+        """What a monkey is up to right now: (pose, face, look, bubble, bob) for any size."""
+        p, t, st = self.p, self._clock(), self.state
+        mine, s = st["who"] == kind, st["state"]
+        age = time.time() - st["since"]
+        pose, face, look, bubble, bob = "idle", None, 0, None, 0
+        if self.moving:
+            bob = round(math.sin(t * 2 + (0 if kind == "claude" else 1.7)) * 0.6)
+        if s == "thinking":
+            pose = "scratch" if int(t * 2 + (kind == "codex")) % 2 else "idle"
+            bubble = ("?", p["accent"])
+        elif s == "working":
+            if mine:
+                pose = ("typeA" if int(t * 8) % 2 else "typeB") if self.moving else "typeA"
+                bubble = ("*" if int(t * 4) % 2 else "+", p[kind])
+            else:
+                look = 1 if kind == "claude" else -1
+        elif s in ("reviewing", "checking") and mine:
+            look, bubble = (1 if kind == "claude" else -1), ("◎", p["accent"])
+        elif s == "pass" and mine and age < 2.5:
+            pose, bubble = "up", ("✓", p["good"])
+        elif s == "fix" and mine and age < 2.5:
+            bubble = ("!", p["bad"])
+        elif s == "done" and age < 4:
+            pose, bubble = "up", ("♪", p["accent"])
+        elif s == "stopped" and age < 6:
+            pose, bubble = "droop", ("…", p["dim"])
+        if self.playful and s in ("idle", "done", "pass", "working") and not (s == "working" and mine):
+            m = (int(t / 2.5) + (2 if kind == "codex" else 0)) % 7
+            face = {1: "wink", 3: "tongue"}.get(m)
+            if m == 5 and s == "idle":
+                pose = "scratch"
+            if m == 6:
+                look = 1 if kind == "claude" else -1
+        blink = self.moving and (time.time() + (0 if kind == "claude" else 1.1)) % 3.7 < 0.18
+        return pose, face, look, bubble, bob, blink
+
+    def _label(self, kind):
+        st = self.state
+        words = {"working": "working", "reviewing": "checking", "checking": "checking"}
+        return words.get(st["state"]) if st["who"] == kind else None
+
+    def _draw_small(self, w, h):
+        """Half-height monkeys with their name and what they're doing beside them."""
+        p, t = self.p, self._clock()
+        cv = Canvas(w, h, p["bg"])
+        ph = h * 2
+        for x in range(w):
+            cv.pixel(x, 0, p["branch"])
+            if (x * 7) % 9 == 0:
+                cv.pixel(x + (int(round(math.sin(t * 1.5 + x))) if self.moving else 0), 1, p["leaf2"])
+        cx = w // 2
+        spots = {"claude": max(0, cx - 24), "codex": min(w - 24, cx + 2)}
+        for kind, x in spots.items():
+            pose, face, look, bubble, bob, blink = self._mood(kind)
+            g = mini_monkey(kind, pose, blink, look, face, tail=int(t * 2.5 + (kind == "codex")) % 2)
+            colors = {"F": p["fur"], "f": p["fur2"], "S": p["skin"], "e": p["eye"], "m": p["fur2"],
+                      "T": p["fur2"], "B": p[kind], "t": p["bad"], "G": p[kind], "K": p["dim"]}
+            cv.sprite(g, x, 1 + max(-1, min(0, bob)), colors)
+            mine = self.state["who"] == kind
+            cv.text(x + 11, 1, self.NAMES[kind], p[kind] if mine else p["dim"])
+            doing = self._label(kind)
+            extra = (bubble[0] + " " if bubble else "") + (doing or "")
+            if extra.strip():
+                cv.text(x + 11, 2, extra.strip(), bubble[1] if bubble else p[kind])
+        if self.banana and self.playful:
+            a, b, started = self.banana
+            k = (time.time() - started) / 1.0
+            if k >= 1:
+                self.banana = None
+            else:
+                x0, x1 = spots[a] + 8, spots[b] + 2
+                cv.sprite([list("YYy"), list(".YY")], int(x0 + (x1 - x0) * k), int(4 - math.sin(k * math.pi) * 3),
+                          {"Y": p["banana"], "y": p["banana2"]})
+        self._confetti(cv, w, ph)
+        if self.state["state"] == "thinking" and self.state["who"] == "lead":
+            cv.text(cx - 5, h - 1, f"{self._spin()} planning", p["accent"])
+        return cv.fragments()
+
+    def _draw_tiny(self, w, h):
+        """One line: a little face for each, and what they're doing."""
+        p = self.p
+        frags = [("", " ")]
+        for kind in ("claude", "codex"):
+            pose, face, look, bubble, bob, blink = self._mood(kind)
+            eyes = ("-", "-") if blink else ("•", "-") if face == "wink" else ("•", "•")
+            mouth = "P" if face == "tongue" else "_" if pose == "droop" or (bubble and bubble[0] in "?!") else "‿"
+            fc = f"({eyes[0]}{mouth}{eyes[1]})"
+            if pose == "up":
+                fc = "\\" + fc[1:-1] + "/"
+            mine = self.state["who"] == kind
+            frags.append((f"fg:{p[kind]} bold" if mine else f"fg:{p[kind]}", fc))
+            frags.append((f"fg:{p[kind] if mine else p['dim']}", f" {self.NAMES[kind]}"))
+            doing = self._label(kind)
+            if doing:
+                dots = "." * (1 + int(time.time() * 3) % 3) if self.moving else "…"
+                frags.append((f"fg:{p[kind]}", f" {doing}{dots:<3}"))
+            if bubble:
+                frags.append((f"fg:{bubble[1]}", f" {bubble[0]}"))
+            frags.append(("", "     "))
+        if self.state["state"] == "thinking" and self.state["who"] == "lead":
+            frags.append((f"fg:{p['accent']}", f"{self._spin()} the lead is planning"))
+        clipped, used = [], 0
+        for st, x in frags:                      # fit the window exactly, however narrow
+            x = x[:max(0, w - used)]
+            if x:
+                clipped.append((f"bg:{p['bg']} {st}".strip(), x))
+                used += len(x)
+        frags = clipped
+        if used < w:
+            frags.append((f"bg:{p['bg']}", " " * (w - used)))
+        return [frags] + [[(f"bg:{p['bg']}", " " * w)] for _ in range(h - 1)]
 
     # ---------- panes ----------
     def transcript(self):
@@ -468,7 +679,7 @@ class TUI:
         if not self.steps:
             return [("class:dim", "No plan yet.\n\nWhen you ask for something,\nthe lead's plan shows here.")]
         out = []
-        spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"[int(time.time() * 10) % 10] if self.prefs["animate"] else "▸"
+        spin = self._spin() if self.moving else "▸"
         for e in self.steps:
             mark, style = {"completed": ("✓", "class:good"), "in_progress": (spin, "class:accent")}.get(
                 e["status"], ("·", "class:dim"))
@@ -495,7 +706,7 @@ class TUI:
             left = " Ready "
         right = (f" {ROUTES[e.route]} · effort {e.effort} · checks {CHECKS[e.checks]}"
                  + (" · PLAN ONLY" if e.dry_run else "")
-                 + f" · F2 animation {'on' if self.prefs['animate'] else 'off'} · F3 {LAYOUT_NAMES[self.prefs['layout']]}"
+                 + f" · F2 monkeys {self.look_name()} · F3 {LAYOUT_NAMES[self.prefs['layout']]}"
                  + f" · F4 {self.prefs['palette']} ")
         return [("class:chip", left), ("class:status", right)]
 
@@ -504,7 +715,7 @@ class TUI:
         self.input = TextArea(height=1, prompt=[("class:accent bold", "› ")], multiline=False,
                               completer=make_completer(self.skills), complete_while_typing=True,
                               accept_handler=self.on_accept, style="class:input")
-        self.stage = Window(StageControl(self), height=10, style="class:bg")
+        self.stage = Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], style="class:bg")
         self.chat = Window(FormattedTextControl(self.transcript, get_cursor_position=self.cursor, show_cursor=False),
                            wrap_lines=True, style="class:panel")
         self.plan_win = Window(FormattedTextControl(self.plan_text), wrap_lines=True, style="class:panel")
@@ -514,7 +725,8 @@ class TUI:
             chat = Frame(self.chat, title="Conversation", style="class:frame")
             plan = Frame(self.plan_win, title="Plan", style="class:frame", width=44)
             if lay == "side":
-                return VSplit([HSplit([Window(StageControl(self), height=10, width=44, style="class:bg"), plan],
+                return VSplit([HSplit([Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], width=44,
+                                             style="class:bg"), plan],
                                       width=46), chat])
             if lay == "focus":
                 return chat
@@ -548,8 +760,7 @@ class TUI:
 
         @kb.add("f2")
         def _(event):
-            self.prefs["animate"] = not self.prefs["animate"]
-            self._save_prefs()
+            self.cycle_look()
 
         @kb.add("f3")
         def _(event):
@@ -636,7 +847,8 @@ class TUI:
         elif cmd in ("help", ""):
             rows = [f"**/{n}** {h}  _{d}_" if h else f"**/{n}**  {d}" for n, h, d in COMMANDS]
             rows.append("**@claude …** or **@codex …**  send just that message to one agent")
-            rows.append("**F2** animation · **F3** layout · **F4** colours · **PgUp/PgDn** scroll · **Ctrl-C** stop")
+            rows.append("**F2** monkeys: playful/calm/off × big/small/tiny (or **/anim calm small**) · **F3** layout · "
+                        "**F4** colours · **PgUp/PgDn** scroll · **Ctrl-C** stop")
             rows.append(f"\n**Skills** ({len(self.skills)}): type / and start typing a name.")
             self._add("sys", "\n" + "\n".join(rows) + "\n")
         elif cmd in ("auto", "claude", "codex"):
@@ -648,6 +860,15 @@ class TUI:
                 self._add("sys", f"\n_Choose one of: {' '.join(ARG_CHOICES[cmd])}_\n")
         elif cmd == "dry":
             e.dry_run = not e.dry_run
+        elif cmd == "anim":
+            words = arg.lower().split()
+            style = next((x for x in words if x in STYLES), None)
+            size = next((x for x in words if x in SIZES), None)
+            if not (style or size):
+                self._add("sys", f"\n_Monkeys: {self.look_name()}. Try /anim calm small, /anim tiny, /anim off "
+                                 "(styles: playful, calm, off · sizes: big, small, tiny). F2 steps through all nine._\n")
+            else:
+                self.set_look(style, size)
         elif cmd == "status":
             self._add("sys", f"\nRouting {ROUTES[e.route]} · effort {e.effort} · mode {MODES[e.mode][0]} · "
                              f"checks {CHECKS[e.checks]}\nNotes: {e.notes}\n")
@@ -681,7 +902,7 @@ class TUI:
 
     async def animate(self):
         while True:
-            await asyncio.sleep(0.08 if self.prefs["animate"] else 0.5)
+            await asyncio.sleep({"playful": 0.08, "calm": 0.2, "off": 0.5}[self.prefs["style"]])
             self._refresh()
 
 

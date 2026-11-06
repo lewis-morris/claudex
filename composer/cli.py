@@ -15,6 +15,7 @@ TTY = sys.stdout.isatty()
 DIM, BOLD, GREEN, RED, CYAN, MAGENTA, RESET = (("\033[2m", "\033[1m", "\033[32m", "\033[31m", "\033[36m",
                                                 "\033[35m", "\033[0m") if TTY else ("",) * 7)
 ARG_CHOICES = {"effort": EFFORTS, "mode": list(MODES), "checks": list(CHECKS)}
+ANIM_CHOICES = ["playful", "calm", "off", "big", "small", "tiny"]
 HISTORY = pathlib.Path.home() / ".cache/claudex/history"
 
 
@@ -101,7 +102,7 @@ def make_completer(skills):
                 return
             if " " in text:
                 cmd, _, arg = text[1:].partition(" ")
-                for v in ARG_CHOICES.get(cmd, []):
+                for v in ARG_CHOICES.get(cmd, ANIM_CHOICES if cmd == "anim" else []):
                     if v.startswith(arg) and " " not in arg:
                         yield Completion(v, -len(arg))
                 return
@@ -164,6 +165,8 @@ async def handle_command(line, eng, skills):
     elif cmd in ("auto", "claude", "codex"):
         eng.route = cmd
         print(f"{DIM}Routing: {ROUTES[eng.route]}{RESET}")
+    elif cmd == "anim":
+        print(f"{DIM}The monkeys live in the full screen: run claudex without --plain.{RESET}")
     elif cmd in ARG_CHOICES:
         if arg in ARG_CHOICES[cmd]:
             setattr(eng, cmd, arg)

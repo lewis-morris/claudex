@@ -15,6 +15,7 @@ COMMANDS = [
     ("mode", "default|acceptEdits|auto|bypassPermissions", "what workers may do without asking"),
     ("checks", "full|reviews|off", "second opinions + reviews / reviews only / none"),
     ("dry", "", "plan only: show who'd do what, change nothing (toggle)"),
+    ("anim", "playful|calm|off big|small|tiny", "how lively and how big the monkeys are (F2 steps through all nine)"),
     ("status", "", "current settings and where the notes are"),
     ("rules", "", "who does what (the routing rules)"),
     ("doctor", "", "check logins, connectors and models"),
@@ -22,7 +23,7 @@ COMMANDS = [
     ("memory", "", "show the project map and past decisions"),
     ("quit", "", "leave Claudex"),
 ]
-TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit"}
+TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim"}
 
 
 def _describe(skill_md):

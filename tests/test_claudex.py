@@ -629,8 +629,8 @@ def test_tui_draws_every_state_layout_and_colour(tmp_path):
     for palette in T.PALETTES:
         t.prefs["palette"] = palette
         t.style()
-        for animate in (True, False):
-            t.prefs["animate"] = animate
+        for style, size in [(st, sz) for st in T.STYLES for sz in T.SIZES]:
+            t.set_look(style, size)
             for who, st, tgt in [(None, "idle", None), ("lead", "thinking", None), ("codex", "working", None),
                                  ("claude", "reviewing", "codex"), ("claude", "pass", "codex"),
                                  ("codex", "fix", "claude"), (None, "done", None), (None, "stopped", None)]:
@@ -814,3 +814,22 @@ def test_handover_files_from_two_jobs_dont_overwrite(job):
     journal = (repo / ".claudex/project/journal.md").read_text()
     for f in files:
         assert str(f) in journal
+
+
+def test_f2_steps_through_all_nine_and_remembers(tmp_path):
+    T, t, e = _tui(tmp_path)
+    seen = set()
+    for _ in range(9):
+        seen.add((t.prefs["style"], t.prefs["size"]))
+        t.cycle_look()
+    assert len(seen) == 9 and (t.prefs["style"], t.prefs["size"]) == ("playful", "big")
+    t.set_look("calm", "small")
+    assert T.TUI(e).prefs["style"] == "calm" and T.TUI(e).prefs["size"] == "small"
+    assert all(len(line) for line in t.draw_stage(60, T.STAGE_ROWS["small"]))
+
+
+def test_old_animation_setting_still_honoured(tmp_path):
+    from composer import tui as T
+    T.PREFS = tmp_path / "ui.json"
+    T.PREFS.write_text('{"animate": false, "layout": "wide", "palette": "Jungle"}')
+    assert T.TUI(engine.Engine(str(tmp_path), None, session_key="t")).prefs["style"] == "off"
