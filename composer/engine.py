@@ -19,6 +19,9 @@ RULES = pathlib.Path(os.environ.get("CLAUDEX_RULES") or os.environ.get("COMPOSER
 CATALOG = pathlib.Path.home() / ".config/agent-of-empires/acp_option_catalog.json"
 NOTES_LIMIT = 8000
 MEMORY_LIMIT = 6000
+JOURNAL_LIMIT = 5000
+INSTRUCTIONS_LIMIT = 6000
+INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")  # Claude reads one, Codex the other; Claudex shows both to everyone
 DECISION_TAG = "DECISION NEEDED:"
 START_TIMEOUT = 120  # seconds for a worker to start, or to accept its settings
 SNAPSHOT_NOTE = ("(File lists and diffs come from Claudex's own snapshots of the working folder. Nothing has "
@@ -121,6 +124,9 @@ class Engine:
         self.log = self.notes_dir / "steps.jsonl"
         self.map = self.project / "map.md"
         self.decisions = self.project / "decisions.md"
+        self.journal = self.project / "journal.md"   # every finished job, from every session
+        self.session_key = key
+        self._job = None
 
     # ---------- settings ----------
     @property
@@ -166,13 +172,43 @@ class Engine:
             lock.release()
 
     def _log(self, **row):
+        if self._job is not None:
+            self._job["rows"].append(row)
         self._append(self.log, json.dumps({"at": datetime.datetime.now().isoformat(timespec="seconds"),
                                            **row}) + "\n")
 
+    def _instructions(self):
+        """The project's own agent instructions. Claude only reads CLAUDE.md and Codex only AGENTS.md, so both
+        are shown to everyone: one set of house rules for the whole team."""
+        parts = []
+        for name in INSTRUCTION_FILES:
+            f = pathlib.Path(self.cwd) / name
+            if f.is_file():
+                parts.append(f"--- {name} ---\n{tail(f.read_text(errors='replace'), INSTRUCTIONS_LIMIT)}")
+        return "\n".join(parts) or "(none)"
+
     def _memory_block(self):
-        return (f"PROJECT MAP:\n{self._read(self.map, MEMORY_LIMIT)}\n\n"
+        """The one shared memory. Every role (lead, second opinion, workers, reviewers, final check) gets this."""
+        return (f"PROJECT INSTRUCTIONS (CLAUDE.md and AGENTS.md; follow both):\n{self._instructions()}\n\n"
+                f"PROJECT MAP:\n{self._read(self.map, MEMORY_LIMIT)}\n\n"
                 f"PAST DECISIONS:\n{self._read(self.decisions, MEMORY_LIMIT)}\n\n"
+                f"RECENT JOBS IN THIS PROJECT (all sessions):\n{self._read(self.journal, JOURNAL_LIMIT)}\n\n"
                 f"THIS SESSION'S NOTES:\n{self._read(self.notes, NOTES_LIMIT)}")
+
+    def _write_journal(self, outcome):
+        """One entry per job in the project-wide journal, so other sessions (and agents) know what happened."""
+        job, self._job = self._job, None
+        if not job or self.dry_run:
+            return
+        lines = [f"\n## {job['at']} · {outcome} · session {self.session_key}", f"Request: {job['request'][:300]}"]
+        for r in job["rows"]:
+            if r.get("kind") == "step":
+                files = f" (files: {', '.join(r['files'][:8])})" if r.get("files") else ""
+                lines.append(f"- step {r['step']} {r['title']}: {r['agent']} {r['model']} {r['effort']}, "
+                             f"try {r['attempt']} → {r.get('verdict', r.get('stop'))}{files}")
+            elif r.get("kind") in ("second_opinion", "final_check"):
+                lines.append(f"- {r['kind'].replace('_', ' ')}: {r.get('verdict')}")
+        self._append(self.journal, "\n".join(lines) + "\n")
 
     # ---------- workers ----------
     async def child(self, name, rules):
@@ -299,13 +335,18 @@ class Engine:
             if work_lock:
                 await work_lock.acquire(lambda: self.ui.say(
                     "_Another Claudex job is working in this project; waiting for it to finish…_\n\n"))
-            return await self._turn(text, rules)
+            self._job = {"at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "request": text, "rows": []}
+            stop = await self._turn(text, rules)
+            self._write_journal("done" if self.ok and stop == "end_turn" else "stopped")
+            return stop
         except asyncio.CancelledError:
             self._clear_our_cancel()
             self.ok, self.cancelled = False, True
+            self._write_journal("stopped")
             await self.ui.say("\n\n_Stopped._\n")
             return "cancelled"
         finally:
+            self._job = None
             self._clear_our_cancel()
             self._task = None
             if work_lock:
@@ -591,6 +632,7 @@ class Engine:
             "contracts with other parts, security issues, or untested risky logic. Don't ask for style changes. "
             "Each issue must be concrete and actionable.\n\n"
             f"USER MESSAGE:\n{text}\n\nTHE STEP IT WAS GIVEN:\n{s['title']}\n{s['instructions']}\n\n"
+            f"SHARED PROJECT MEMORY (judge against these rules and decisions too):\n{self._memory_block()}\n\n"
             f"WORKER'S HANDOFF:\n{tail(out, 4000)}\n\n{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n\n"
             + ("NOTE: the diff below is cut short; read the remaining changed files directly before judging.\n"
                if truncated else "") + f"DIFF:\n{diff}\n")
@@ -624,6 +666,7 @@ class Engine:
             "You led this job. All steps are done and each was reviewed. Check that the parts fit together and "
             "the user's request is fully met. You may read project files (read-only).\n\n"
             f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(steps, indent=1)}\n\n"
+            f"SHARED PROJECT MEMORY:\n{self._memory_block()}\n\n"
             f"{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n"
             + ("NOTE: the diff is cut short; read the remaining files directly.\n" if truncated else "")
             + f"DIFF:\n{diff}\n")

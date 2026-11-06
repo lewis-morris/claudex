@@ -551,3 +551,48 @@ def test_cancelled_diagnostic_leaves_nothing_running(tmp_path, monkeypatch):
         return res
     res = asyncio.run(go())
     assert res == {"stopReason": "cancelled"} and groups and not _group_alive(groups[0])
+
+
+# ---------- one shared brain and memory ----------
+def test_everyone_shares_one_memory(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("House rule from CLAUDE.md: money is always whole pence.\n")
+    (repo / "AGENTS.md").write_text("House rule from AGENTS.md: run pytest -q before handing over.\n")
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "rules"], cwd=repo, check=True)
+
+    # Session A (say, a terminal) does a job.
+    answers["plan"] = [{"steps": [step(title="Earlier job")], "big_decisions": [], "concern_responses": []}]
+    answers["review"] = [{"verdict": "pass", "issues": [], "summary": "ok"}]
+    FakeChild.script = [("old.py", "x = 1\n", "Made old.py. Codex note: totals live in calc.py")]
+    asyncio.run(engine.Engine(str(repo), UI(), settings={}, session_key="A").turn("first job"))
+
+    # Session B (say, Agents of Empires) does a two-part job with a big decision.
+    calls.clear()
+    FakeChild.started = []
+    answers["plan"] = [{"steps": [step("codex", title="Sums"), step("claude", "sonnet", title="Page")],
+                        "big_decisions": [{"decision": "VAT on the subtotal", "why": "UK practice",
+                                           "alternatives": "per line"}], "concern_responses": []}]
+    answers["opinion"] = {"verdict": "agree", "concerns": [], "suggestion": ""}
+    answers["review"] = [{"verdict": "pass", "issues": [], "summary": "ok"},
+                         {"verdict": "pass", "issues": [], "summary": "ok"}]
+    FakeChild.script = [("calc.py", "def vat(p): return (p*20+50)//100\n", "HANDOFF-FROM-CODEX: vat() is in calc.py"),
+                        ("page.html", "<p>VAT</p>\n", "page done")]
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="B")
+    asyncio.run(e.turn("second job"))
+
+    must_see = ["whole pence", "pytest -q", "first job", "Earlier job"]       # both rule files + session A's work
+    prompts = {kind: [c[4] for c in calls if c[0] == kind] for kind in ("plan", "opinion", "review", "final")}
+    briefs = [w.prompts[0] for w in FakeChild.started]
+    for who, texts in [("lead", prompts["plan"]), ("second opinion", prompts["opinion"]),
+                       ("reviewers", prompts["review"]), ("final check", prompts["final"]), ("workers", briefs)]:
+        assert texts, who
+        for t in texts:
+            for needle in must_see:
+                assert needle in t, f"{who} can't see {needle!r}"
+    # Big decisions reach everyone after they're made; the second worker sees the first one's handover.
+    for t in briefs + prompts["review"] + prompts["final"]:
+        assert "VAT on the subtotal" in t
+    assert "HANDOFF-FROM-CODEX" in briefs[1] and "HANDOFF-FROM-CODEX" in prompts["final"][0]
+    journal = (repo / ".claudex/project/journal.md").read_text()
+    assert "session A" in journal and "session B" in journal and "calc.py" in journal
