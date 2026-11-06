@@ -263,8 +263,11 @@ class Engine:
 
     def _single(self, text, agent, rules, why):
         d = rules["agent_defaults"][agent]
+        # Sent straight to Claude (@claude, "Claude only", a Claude skill): it gets the browser, as Claude
+        # always has, since nobody planned whether it needs it.
+        browser = agent in rules["browser"]["signed_in"]
         return {"steps": [{"title": "Your request", "agent": agent, "model": d["model"], "effort": d["effort"],
-                           "browser": False, "why": why, "instructions": text}],
+                           "browser": browser, "why": why, "instructions": text}],
                 "big_decisions": [], "concern_responses": []}
 
     async def second_opinion(self, text, plan, rules):

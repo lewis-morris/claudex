@@ -180,6 +180,8 @@ def job(repo, monkeypatch):
 
     monkeypatch.setattr(headless, "ask", fake_ask)
     monkeypatch.setattr(engine, "Child", FakeChild)
+    import tempfile
+    monkeypatch.setattr(engine, "CHROME_LOCK", pathlib.Path(tempfile.mkdtemp()) / "chrome.lock")  # not the real key
     FakeChild.script, FakeChild.started = [], []
     answers["map"] = {"map": "# Map\n"}
     answers["final"] = {"verdict": "pass", "problems": [], "summary": "fits"}
@@ -309,7 +311,14 @@ def test_forced_route_skips_lead(job):
     repo, calls, answers = job
     FakeChild.script = [(None, "", "hi")]
     e, ui, stop = run(repo, text="@claude explain this")
-    assert not any(c[0] == "plan" for c in calls) and FakeChild.started[0].name == "claude"
+    assert not any(c[0] == "plan" for c in calls) and FakeChild.started[0].name == "claude_browser"
+
+
+def test_forced_codex_has_no_browser(job):
+    repo, calls, answers = job
+    FakeChild.script = [(None, "", "hi")]
+    run(repo, text="@codex explain this")
+    assert FakeChild.started[0].name == "codex"
 
 
 # ---------- Codex's review findings ----------
@@ -506,3 +515,39 @@ def test_acp_local_command_can_be_cancelled(tmp_path, monkeypatch):
         return await asyncio.wait_for(t, 5), srv.sessions[sid].busy
     res, busy = asyncio.run(go())
     assert res == {"stopReason": "cancelled"} and busy is False
+
+
+def test_cancelled_diagnostic_leaves_nothing_running(tmp_path, monkeypatch):
+    """A cancelled /doctor in Agents of Empires takes its whole process group with it."""
+    from composer import server
+    from composer.child import _group_alive
+    fake = tmp_path / "bin"
+    fake.mkdir()
+    script = fake / "claudex"
+    script.write_text("#!/bin/sh\nsleep 300 &\nsleep 300\n")
+    script.chmod(0o755)
+    real_path = pathlib.Path
+    monkeypatch.setattr(server.pathlib, "Path", lambda *a: tmp_path / "composer" / "server.py"
+                        if a and str(a[0]).endswith("server.py") else real_path(*a))
+    (tmp_path / "composer").mkdir()
+    srv = _server_session(tmp_path)
+    groups = []
+    real_exec = asyncio.create_subprocess_exec
+
+    async def spy(*a, **k):
+        p = await real_exec(*a, **k)
+        groups.append(p.pid)
+        return p
+    monkeypatch.setattr(server.asyncio, "create_subprocess_exec", spy)
+
+    async def go():
+        sid = (await srv.on_request("session/new", {"cwd": str(tmp_path), "mcpServers": []}))["sessionId"]
+        t = asyncio.ensure_future(srv.on_request("session/prompt", {"sessionId": sid, "prompt": [
+            {"type": "text", "text": "/doctor"}]}))
+        await asyncio.sleep(0.5)
+        await srv.on_notify("session/cancel", {"sessionId": sid})
+        res = await asyncio.wait_for(t, 5)
+        await asyncio.sleep(0.2)
+        return res
+    res = asyncio.run(go())
+    assert res == {"stopReason": "cancelled"} and groups and not _group_alive(groups[0])

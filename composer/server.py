@@ -3,6 +3,7 @@ import asyncio
 import os
 import sys
 import pathlib
+import signal
 import subprocess
 import uuid
 
@@ -137,11 +138,15 @@ class Server:
             args = [str(me), cmd] + (["--cwd", e.cwd] if cmd == "log" else [])
             env = dict(os.environ, **({"CLAUDEX_RULES": os.path.abspath(e.rules_path)} if e.rules_path else {}))
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
-                                                     stderr=asyncio.subprocess.STDOUT, env=env)
+                                                     stderr=asyncio.subprocess.STDOUT, env=env,
+                                                     start_new_session=True)
             try:
                 out, _ = await p.communicate()
             except asyncio.CancelledError:
-                p.kill()
+                try:
+                    os.killpg(p.pid, signal.SIGKILL)  # the command and anything it started
+                except ProcessLookupError:
+                    pass
                 await p.wait()
                 raise
             return "```\n" + out.decode(errors="replace").strip() + "\n```\n"
