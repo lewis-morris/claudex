@@ -1,0 +1,246 @@
+"""claudex doctor | rules | log | update."""
+import argparse
+import asyncio
+import datetime
+import json
+import os
+import pathlib
+import shutil
+import subprocess
+import sys
+import time
+
+from . import headless
+from .engine import CATALOG, RULES, load_rules
+
+OK, WARN, BAD = "\033[32m✓\033[0m", "\033[33m!\033[0m", "\033[31m✗\033[0m"
+if not sys.stdout.isatty():
+    OK, WARN, BAD = "OK  ", "WARN", "FAIL"
+CLAUDE_ALIASES = {"opus", "sonnet", "haiku", "fable", "default", "best", "opusplan"}
+CONNECTOR_PACKAGES = ["@agentclientprotocol/claude-agent-acp", "@agentclientprotocol/codex-acp"]
+AOE_CONFIG = pathlib.Path.home() / ".config/agent-of-empires/config.toml"
+
+
+def _run(cmd, timeout=60):
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=headless._env())
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except Exception as e:
+        return 1, str(e)
+
+
+def used_models(rules):
+    """Every (agent, model, effort) the rules can ask for, with where it's used."""
+    out = {}
+
+    def add(agent, model, effort, where):
+        out.setdefault((agent, model, effort), []).append(where)
+    lead = rules["lead"]
+    add(lead.get("agent", "claude"), lead["model"], lead["effort"], "lead")
+    d = rules["defaults"]
+    add(d["agent"], d["model"], d["effort"], "default")
+    for a, v in rules["agent_defaults"].items():
+        add(a, v["model"], v["effort"], f"{a} only")
+    for r in rules.get("rule", []):
+        u = r["use"]
+        add(u["agent"], u["model"], u["effort"], r["when"][:40])
+    for a, v in rules.get("reviewers", {}).items():
+        add(a, v["model"], v["effort"], "reviewer")
+    for a, rungs in rules.get("ladder", {}).items():
+        for m, e in rungs:
+            add(a, m, e, "step-up ladder")
+    m = rules.get("memory", {}).get("map_model")
+    if m:
+        add(m["agent"], m["model"], m["effort"], "project map")
+    return out
+
+
+def codex_catalog():
+    try:
+        d = json.loads((pathlib.Path.home() / ".codex/models_cache.json").read_text())
+        models = d.get("models", d) if isinstance(d, dict) else d
+        return {m.get("slug") or m.get("id"): [x.get("effort") for x in m.get("supported_reasoning_levels") or []]
+                for m in models}
+    except Exception:
+        return {}
+
+
+def doctor(live=False):
+    problems = 0
+    unverified = set()
+
+    def line(mark, text):
+        nonlocal problems
+        if mark == BAD:
+            problems += 1
+        print(f" {mark} {text}")
+
+    print("Logins and versions")
+    code, out = _run(["claude", "--version"])
+    line(OK if code == 0 else BAD, f"Claude Code {out.splitlines()[0] if out else '(not found)'}")
+    code, out = _run(["claude", "auth", "status"])
+    try:
+        st = json.loads(out)
+        exp = st.get("loginExpiresAt")
+        days = (datetime.datetime.fromisoformat(exp.replace("Z", "+00:00"))
+                - datetime.datetime.now(datetime.timezone.utc)).days if exp else None
+        if not st.get("loggedIn"):
+            line(BAD, "Claude: not logged in. Run: claude auth login")
+        elif days is not None and days < 7:
+            line(WARN, f"Claude: logged in ({st.get('authMethod')}), but the login ends in {days} days")
+        else:
+            line(OK, f"Claude: logged in ({st.get('authMethod')})" + (f", {days} days left" if days else ""))
+    except Exception:
+        line(BAD, f"Claude: couldn't read login status ({out[:120]})")
+    code, out = _run(["codex", "--version"])
+    line(OK if code == 0 else BAD, f"Codex {out.splitlines()[-1] if out else '(not found)'}")
+    code, out = _run(["codex", "login", "status"])
+    line(OK if code == 0 and "Logged in" in out else BAD,
+         f"Codex: {out.splitlines()[-1] if out else 'unknown'}" + ("" if "Logged in" in out else ". Run: codex login"))
+
+    print("\nRules")
+    try:
+        rules = load_rules()
+        line(OK, f"{RULES}")
+    except Exception as e:
+        line(BAD, f"{RULES} won't load: {e}")
+        return 1
+
+    print("\nWorker connectors")
+    for name, cmd in rules["agents"].items():
+        exe = cmd[0]
+        line(OK if os.access(exe, os.X_OK) else BAD, f"{name}: {exe}")
+
+    print("\nModels")
+    cx = codex_catalog()
+    try:
+        opts = json.loads(CATALOG.read_text())["agents"]["claude"]["options"]
+        aoe_claude = [v["value"] for o in opts if o.get("id") == "model" for v in o["options"]]
+    except Exception:
+        aoe_claude = []
+    uses = used_models(rules)
+    for (agent, model, effort), where in sorted(uses.items()):
+        label = f"{agent} {model} {effort}  ({', '.join(sorted(set(where)))[:70]})"
+        if agent == "codex":
+            if not cx:
+                line(WARN, f"{label}: no Codex model list cached yet")
+            elif model not in cx:
+                line(BAD, f"{label}: Codex doesn't offer {model}")
+            elif cx[model] and effort not in cx[model]:
+                line(BAD, f"{label}: {model} doesn't support {effort}")
+            else:
+                line(OK, label)
+        else:
+            if model in CLAUDE_ALIASES or model in aoe_claude:
+                line(OK, label)
+            elif model.startswith("claude-"):
+                unverified.add((agent, model))
+                line(WARN, f"{label}: can't confirm this exact name offline (doctor --live checks it)")
+            else:
+                line(BAD, f"{label}: unknown Claude model")
+
+    print("\nAgents of Empires")
+    try:
+        text = AOE_CONFIG.read_text()
+        line(OK if 'claudex = "' in text else WARN,
+             "claudex is registered" if 'claudex = "' in text else "claudex isn't registered as an agent")
+    except Exception:
+        line(WARN, "no Agents of Empires config found")
+
+    if live:
+        print("\nLive check (a tiny message to each model)")
+        seen = {}
+        for (agent, model, _effort) in uses:
+            seen.setdefault((agent, model), True)
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}}
+        for agent, model in sorted(seen):
+            t = time.time()
+            try:
+                asyncio.run(headless.ask(agent, os.getcwd(), "Return ok=true.", schema, model, "low",
+                                         timeout=240, read_files=False))
+                line(OK, f"{agent} {model} answered in {time.time() - t:.0f}s")
+                unverified.discard((agent, model))
+            except Exception as e:
+                line(BAD, f"{agent} {model}: {str(e)[:160]}")
+    if unverified:
+        problems += len(unverified)
+        print(f"\n {WARN} Not verified: " + ", ".join(m for _, m in sorted(unverified))
+              + ". Run `claudex doctor --live` to check them.")
+    print("\n" + ("All good." if not problems else f"{problems} problem(s) found."))
+    return 1 if problems else 0
+
+
+def show_rules(edit=False):
+    if edit:
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+        return subprocess.call([editor, str(RULES)])
+    r = load_rules()
+    lead = r["lead"]
+    print(f"Rules file: {RULES}  (re-read on every message; `claudex rules --edit` to change)\n")
+    print(f"Lead:        {lead.get('agent', 'claude')} {lead['model']} {lead['effort']}")
+    d = r["defaults"]
+    print(f"Default:     {d['agent']} {d['model']} {d['effort']}")
+    for a, v in r.get("reviewers", {}).items():
+        print(f"Reviewer:    {a} {v['model']} {v['effort']}  (checks the other side's work)")
+    print("\nWho does what:")
+    for x in r.get("rule", []):
+        u = x["use"]
+        extra = " + browser" if u.get("browser") else ""
+        print(f"  {u['agent']:6} {u['model']:12} {u['effort']:7}{extra}  {x['when']}")
+    print("\nStep-up ladder (when a review keeps failing):")
+    for a, rungs in r.get("ladder", {}).items():
+        print(f"  {a}: " + " → ".join(f"{m} {e}" for m, e in rungs))
+    return 0
+
+
+def show_log(cwd, n):
+    rows = []
+    for f in (pathlib.Path(cwd) / ".claudex" / "sessions").glob("*/steps.jsonl"):
+        for l in f.read_text().splitlines():
+            try:
+                rows.append({**json.loads(l), "_session": f.parent.name})
+            except Exception:
+                pass
+    rows.sort(key=lambda r: r.get("at", ""))
+    if not rows:
+        print("No Claudex steps in this project yet.")
+        return 0
+    for r in rows[-n:]:
+        if r.get("kind") == "step":
+            print(f"{r['at']}  step {r['step']} · {r['agent']} {r['model']} {r['effort']} · try {r.get('attempt', 1)}"
+                  f" · {r.get('secs', '?')}s · {r.get('verdict', r.get('stop'))} · {r['title'][:50]}")
+        else:
+            print(f"{r['at']}  {r.get('kind')} · {r.get('verdict')} {r.get('reviewer', '')}")
+    return 0
+
+
+def update():
+    steps = [["claude", "update"], ["codex", "update"],
+             ["npm", "update", "-g", *CONNECTOR_PACKAGES]]
+    for cmd in steps:
+        print(f"\n$ {' '.join(cmd)}")
+        if subprocess.call(cmd, env=headless._env()) != 0:
+            print(f"(that didn't finish cleanly; carrying on)")
+    print()
+    return doctor()
+
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="claudex")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("doctor", help="check logins, versions, connectors and models")
+    d.add_argument("--live", action="store_true", help="also send a tiny message to every model")
+    r = sub.add_parser("rules", help="show who does what")
+    r.add_argument("--edit", action="store_true")
+    lg = sub.add_parser("log", help="recent steps in this project")
+    lg.add_argument("-n", type=int, default=20)
+    lg.add_argument("--cwd", default=".")
+    sub.add_parser("update", help="update Claude, Codex and the connectors, then run doctor")
+    a = ap.parse_args(argv)
+    if a.cmd == "doctor":
+        return doctor(a.live)
+    if a.cmd == "rules":
+        return show_rules(a.edit)
+    if a.cmd == "log":
+        return show_log(a.cwd, a.n)
+    return update()

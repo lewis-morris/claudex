@@ -1,6 +1,7 @@
 """A worker agent (Claude or Codex) driven over ACP as a child process."""
 import asyncio
 import os
+import signal
 
 from .rpc import Peer, RpcError
 
@@ -23,7 +24,7 @@ class Child:
         self.proc = await asyncio.create_subprocess_exec(
             *self.cmd, cwd=self.cwd, env=env, limit=64 * 1024 * 1024,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL)
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
 
         def write(line):
             self.proc.stdin.write(line.encode() + b"\n")
@@ -66,13 +67,35 @@ class Child:
         if self.peer and self.session_id:
             self.peer.notify("session/cancel", {"sessionId": self.session_id})
 
-    async def close(self):
-        if self.proc and self.proc.returncode is None:
+    async def close(self, grace=3):
+        """Stop the worker and everything it started (its whole process group), and wait until all are gone.
+
+        The connector exiting isn't enough: anything it launched (a shell, a test run) can outlive it, so the
+        group is always signalled and checked, whatever the connector did.
+        """
+        if not self.proc:
+            return
+        if self.proc.returncode is None:
             try:
                 self.proc.stdin.close()
-                await asyncio.wait_for(self.proc.wait(), 3)
+                await asyncio.wait_for(self.proc.wait(), grace)
             except Exception:
-                self.proc.kill()
+                pass
+        pgid = self.proc.pid
+        for sig in (signal.SIGTERM, signal.SIGKILL):
+            if not _group_alive(pgid):
+                break
+            try:
+                os.killpg(pgid, sig)
+            except ProcessLookupError:
+                break
+            for _ in range(50):
+                if not _group_alive(pgid):
+                    break
+                await asyncio.sleep(0.1)
+        if self.proc.returncode is None:
+            await self.proc.wait()
+
 
     # --- messages from the worker ---
     async def _on_notify(self, method, params):
@@ -98,3 +121,13 @@ class Child:
             p["toolCall"] = tc
             return await self.ui.permission(p)
         raise RpcError(-32601, f"composer does not provide {method}")
+
+
+def _group_alive(pgid):
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True

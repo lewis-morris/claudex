@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A tiny stand-in for Agents of Empires: drives `composer --acp` and prints what AoE would show.
+"""A tiny stand-in for Agents of Empires: drives `claudex --acp` and prints what AoE would show.
 
 Usage: acp_client.py PROJECT_DIR "message" [route]
 Permission requests are answered with the first 'allow' option.
@@ -12,7 +12,7 @@ import sys
 import threading
 import time
 
-COMPOSER = str(pathlib.Path(__file__).resolve().parent.parent / "bin" / "composer")
+COMPOSER = str(pathlib.Path(__file__).resolve().parent.parent / "bin" / "claudex")
 
 
 def main():

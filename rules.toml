@@ -1,11 +1,45 @@
-# Composer routing rules. Edit freely: they are re-read on every message.
+# Claudex routing rules (`claudex rules` shows them, `claudex rules --edit` opens this file). Edit freely: they are re-read on every message.
 # Model names are checked against what each agent offers right now, so a renamed
 # or retired model falls back to that agent's default instead of failing.
 
 [lead]
-# The planner that splits a job and picks who does each part.
-model = "sonnet"
-effort = "low"
+# The planner that splits a job, picks who does each part, and does the final check
+# (Lewis's table: architect / technical lead = Claude Opus 5.5, high).
+agent = "claude"
+model = "opus"
+effort = "high"
+
+[reviewers]
+# Each side checks the other's work and gives second opinions on the other's big decisions
+# (Lewis's table: code reviewer = Claude Opus 5.5 / GPT-6 Astra, high).
+claude = { model = "opus", effort = "high" }
+codex = { model = "gpt-6-astra", effort = "high" }
+
+[review]
+enabled = true
+max_attempts = 3          # 1st try, fix once at the same level, then one step up the ladder
+skip_low_effort = false   # true: low-effort steps aren't reviewed (cheaper, less safe)
+diff_limit = 60000        # characters of diff sent to the reviewer (it's told if it was cut short)
+
+[checks]
+if_unavailable = "stop"   # if a review/second opinion can't run (login, model, timeout): "stop" or "continue"
+
+[final_check]
+enabled = true            # after a job with more than one step, the lead checks the parts fit together
+
+[memory]
+update_map = true         # refresh .claudex/project/map.md after a job that changed files
+map_model = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
+
+[limits]
+plan_timeout_min = 10
+check_timeout_min = 15
+step_timeout_min = 60
+
+[ladder]
+# Where a worker steps up to when its work keeps failing review. Never Max.
+codex = [["gpt-6.1-sol", "low"], ["gpt-6.1-sol", "medium"], ["gpt-6.1-sol", "high"], ["gpt-6-astra", "high"], ["gpt-6-astra", "xhigh"]]
+claude = [["sonnet", "medium"], ["sonnet", "high"], ["opus", "medium"], ["opus", "high"], ["opus", "xhigh"]]
 
 [defaults]
 # Used when no rule clearly fits (Lewis, 6 Nov 2026: GPT-6.1 Sol, medium).
@@ -19,8 +53,10 @@ claude = { model = "opus", effort = "medium" }
 codex = { model = "gpt-6.1-sol", effort = "medium" }
 
 [agents]
-# The ACP connector each worker is started with.
-claude = ["/home/lewismorris/.local/bin/claude-agent-acp-chrome"]
+# The ACP connector each worker is started with. claude_browser has Claude in Chrome switched on and
+# is only used for steps that need Lewis's signed-in browser (one at a time, across all sessions).
+claude = ["/home/lewismorris/.nvm/versions/node/v24.18.0/bin/claude-agent-acp"]
+claude_browser = ["/home/lewismorris/.local/bin/claude-agent-acp-chrome"]
 codex = ["/home/lewismorris/.nvm/versions/node/v24.18.0/bin/codex-acp"]
 
 [effort_option]

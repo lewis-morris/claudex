@@ -1,4 +1,3 @@
 #!/bin/sh
-# Composer launcher: terminal chat by default, `composer --acp` for Agents of Empires.
-export PATH="/home/lewismorris/.nvm/versions/node/v24.18.0/bin:/home/lewismorris/.local/bin:$PATH"
-exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/home/lewismorris/Projects/composer"); sys.argv[0] = "composer"; from composer.__main__ import main; main()' "$@"
+# Old name for Claudex; kept so existing Agents of Empires sessions keep working.
+exec /home/lewismorris/Projects/composer/bin/claudex "$@"
