@@ -8,7 +8,8 @@ claudex --acp                run as an agent for Agents of Empires (or any ACP c
 claudex doctor [--live]      check logins, versions, connectors and every model in the rules
 claudex rules [--edit]       show (or edit) who does what
 claudex log [-n N]           recent steps in this project
-claudex update               update Claude, Codex and both connectors, then run doctor"""
+claudex update               update Claude, Codex and both connectors, then run doctor
+claudex demo                 preview the full-screen look (1 2 3 colours, q quits)"""
 
 
 def chat_parser():
@@ -48,6 +49,9 @@ def settings_from(args):
 
 def main():
     argv = sys.argv[1:]
+    if argv and argv[0] == "demo":
+        from . import ui_demo
+        sys.exit(ui_demo.main())
     if argv and argv[0] in ("doctor", "rules", "log", "update"):
         from . import tools
         sys.exit(tools.main(argv))
