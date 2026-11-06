@@ -8,6 +8,7 @@ import pathlib
 import subprocess
 import time
 import tomllib
+import uuid
 
 from . import fun, gitsnap, headless
 from .child import Child
@@ -232,7 +233,8 @@ class Engine:
         out = out.strip()
         if len(out) <= HANDOFF_LIMIT * 2:
             return out
-        path = self.notes_dir / "handovers" / f"step{i}-try{attempt}-{agent}.md"
+        job_id = (self._job or {}).get("id", "job")
+        path = self.notes_dir / "handovers" / f"{job_id}-step{i}-try{attempt}-{agent}.md"   # unique per job
         if not self.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(out + "\n")
@@ -399,7 +401,9 @@ class Engine:
             if work_lock:
                 await work_lock.acquire(lambda: self.ui.say(
                     "_Another Claudex job is working in this project; waiting for it to finish…_\n\n"))
-            self._job = {"at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "request": text, "rows": []}
+            now = datetime.datetime.now()
+            self._job = {"at": now.strftime("%Y-%m-%d %H:%M"), "request": text, "rows": [],
+                         "id": now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]}
             stop = await self._turn(text, rules)
             self._write_journal("done" if self.ok and stop == "end_turn" else "stopped")
             self._act(None, "done" if self.ok and stop == "end_turn" else "stopped")

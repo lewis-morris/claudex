@@ -797,3 +797,20 @@ def test_huge_output_never_wipes_the_screen(tmp_path):
     t._add("sys", "hello")
     t._add("codex", "y" * (T.TOTAL_CHARS + 10))
     assert t.blocks and t.blocks[-1]["who"] == "codex" and len(t.blocks[-1]["text"]) == T.BLOCK_CHARS
+
+
+def test_handover_files_from_two_jobs_dont_overwrite(job):
+    repo, calls, answers = job
+    answers["plan"] = [{"steps": [step()], "big_decisions": [], "concern_responses": []},
+                       {"steps": [step()], "big_decisions": [], "concern_responses": []}]
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+    FakeChild.script = [("a.py", "1\n", "FIRST-JOB\n" + "x\n" * 3000), ("a.py", "2\n", "SECOND-JOB\n" + "y\n" * 3000)]
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    asyncio.run(e.turn("one"))
+    asyncio.run(e.turn("two"))
+    files = sorted((repo / ".claudex/sessions/t/handovers").glob("*.md"))
+    texts = [f.read_text().split("\n")[0] for f in files]
+    assert len(files) == 2 and set(texts) == {"FIRST-JOB", "SECOND-JOB"}
+    journal = (repo / ".claudex/project/journal.md").read_text()
+    for f in files:
+        assert str(f) in journal
