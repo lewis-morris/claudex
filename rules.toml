@@ -1,0 +1,71 @@
+# Composer routing rules. Edit freely: they are re-read on every message.
+# Model names are checked against what each agent offers right now, so a renamed
+# or retired model falls back to that agent's default instead of failing.
+
+[lead]
+# The planner that splits a job and picks who does each part.
+model = "sonnet"
+effort = "low"
+
+[defaults]
+# Used when no rule clearly fits (Lewis, 6 Nov 2026: GPT-6.1 Sol, medium).
+agent = "codex"
+model = "gpt-6.1-sol"
+effort = "medium"
+
+[agent_defaults]
+# Used when you force one agent ("Claude only" / "Codex only", or start with @claude / @codex).
+claude = { model = "opus", effort = "medium" }
+codex = { model = "gpt-6.1-sol", effort = "medium" }
+
+[agents]
+# The ACP connector each worker is started with.
+claude = ["/home/lewismorris/.local/bin/claude-agent-acp-chrome"]
+codex = ["/home/lewismorris/.nvm/versions/node/v24.18.0/bin/codex-acp"]
+
+[effort_option]
+# What each agent calls its reasoning setting.
+claude = "effort"
+codex = "reasoning_effort"
+
+[browser]
+# Only these agents can use Lewis's signed-in Chrome today.
+signed_in = ["claude"]
+
+# Starting rules (Lewis's table). The lead may deviate but must say why.
+[[rule]]
+when = "small fixes, CSS tweaks, config edits, simple scripts"
+use = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
+[[rule]]
+when = "everyday Python, Flask, React, Shopify, API integrations, tests"
+use = { agent = "codex", model = "gpt-6.1-sol", effort = "medium" }
+[[rule]]
+when = "multi-file features, migrations, complex integrations, performance optimisation"
+use = { agent = "codex", model = "gpt-6.1-sol", effort = "high" }
+[[rule]]
+when = "difficult debugging, complex algorithms, PostgreSQL optimisation, backend logic, number crunching"
+use = { agent = "codex", model = "gpt-6-astra", effort = "high" }
+[[rule]]
+when = "persistent bugs, concurrency problems, major system failures"
+use = { agent = "codex", model = "gpt-6-astra", effort = "xhigh" }
+[[rule]]
+when = "React, MUI, HTML/CSS, documentation, general front-end development"
+use = { agent = "claude", model = "sonnet", effort = "medium" }
+[[rule]]
+when = "complex UI design, front-end architecture, advanced JavaScript, UX improvements"
+use = { agent = "claude", model = "sonnet", effort = "high" }
+[[rule]]
+when = "anything needing Lewis's signed-in browser: checking a live page, Shopify admin, logged-in sites"
+use = { agent = "claude", model = "sonnet", effort = "medium", browser = true }
+[[rule]]
+when = "codebase analysis, technical planning, code reviews"
+use = { agent = "claude", model = "opus", effort = "medium" }
+[[rule]]
+when = "application architecture, large refactoring, authentication, complex systems"
+use = { agent = "claude", model = "opus", effort = "high" }
+[[rule]]
+when = "major architectural problems, particularly difficult refactoring, security investigations"
+use = { agent = "claude", model = "opus", effort = "xhigh" }
+[[rule]]
+when = "a quick question, chat, or explanation that needs no code changes"
+use = { agent = "claude", model = "sonnet", effort = "low" }
