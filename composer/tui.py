@@ -220,6 +220,7 @@ class TUI:
         self.scroll_back = 0
         self.questions = []         # permission questions waiting for an answer, oldest first: (future, options)
         self.cmd_task = None        # a running /doctor, /rules or /log
+        self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
         self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
         self.version = 0
         self.skills = load_skills()
@@ -251,9 +252,10 @@ class TUI:
         if self.blocks and self.blocks[-1]["who"] == who:
             self.blocks[-1]["text"] = (self.blocks[-1]["text"] + text)[-BLOCK_CHARS:]
         else:
-            self.blocks.append({"who": who, "text": text})
-        while len(self.blocks) > 400 or sum(len(b["text"]) for b in self.blocks) > TOTAL_CHARS:
-            self.blocks.pop(0)
+            self.blocks.append({"who": who, "text": text[-BLOCK_CHARS:]})
+        while len(self.blocks) > 1 and (len(self.blocks) > 400
+                                         or sum(len(b["text"]) for b in self.blocks) > TOTAL_CHARS):
+            self.blocks.pop(0)   # oldest first; the newest block always stays
         self.version += 1
         self._refresh()
 
@@ -274,6 +276,8 @@ class TUI:
             self._add(who, f"\n_⏺ {title[:110]}_\n")
 
     async def permission(self, params):
+        if self.stopping or not (self.busy and not self.busy.done()):
+            return {"outcome": {"outcome": "cancelled"}}   # no live job to ask for: never carry it forward
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
         fut = asyncio.get_running_loop().create_future()
@@ -530,6 +534,7 @@ class TUI:
         def _(event):
             if self.busy and not self.busy.done():
                 self._add("sys", "\n_Stopping…_\n")
+                self.stopping = True
                 self.drop_questions()
                 self.eng.cancel()
             elif self.cmd_task and not self.cmd_task.done():
@@ -620,6 +625,7 @@ class TUI:
             self.activity(None, "stopped")
         finally:
             self.drop_questions()   # nothing from this job may answer later
+            self.stopping = False
             self._refresh()
 
     async def command(self, line):

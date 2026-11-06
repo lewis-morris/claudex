@@ -643,11 +643,16 @@ def test_tui_draws_every_state_layout_and_colour(tmp_path):
         t.app.layout.container.content.get_children()  # builds without error
 
 
+def _live_job(t):
+    t.busy = asyncio.ensure_future(asyncio.sleep(30))
+
+
 def test_tui_permission_is_answered_by_typing_a_number(tmp_path):
     T, t, e = _tui(tmp_path)
     t.build()
 
     async def go():
+        _live_job(t)
         ask = asyncio.ensure_future(t.permission({"toolCall": {"title": "rm -rf build"}, "options": [
             {"optionId": "yes", "name": "Allow"}, {"optionId": "no", "name": "Deny", "kind": "reject_once"}]}))
         await asyncio.sleep(0)
@@ -663,12 +668,12 @@ def test_permission_questions_queue_and_cancel_cleanly(tmp_path):
     opts = [{"optionId": "yes", "name": "Allow"}, {"optionId": "no", "name": "Deny"}]
 
     async def go():
+        _live_job(t)
         a = asyncio.ensure_future(t.permission({"toolCall": {"title": "first"}, "options": opts}))
         b = asyncio.ensure_future(t.permission({"toolCall": {"title": "second"}, "options": opts}))
         await asyncio.sleep(0)
         t.on_accept(type("L", (), {"text": "1"})())   # answers the FIRST question
         t.on_accept(type("L", (), {"text": "1"})())   # then the second, no crash on a double answer
-        t.on_accept(type("L", (), {"text": "2"})())   # nothing waiting: treated as a new message, not an answer
         first, second = await a, await b
         c = asyncio.ensure_future(t.permission({"toolCall": {"title": "third"}, "options": opts}))
         await asyncio.sleep(0)
@@ -747,3 +752,48 @@ def test_screen_memory_is_bounded(tmp_path):
             t.activity("codex", "working")
     asyncio.run(go())
     assert sum(len(b["text"]) for b in t.blocks) <= T.TOTAL_CHARS and "prev" not in t.state
+
+
+def test_late_permission_after_stop_is_refused(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+
+    async def go():
+        _live_job(t)
+        t.stopping = True                       # Ctrl-C was pressed
+        return await t.permission({"toolCall": {"title": "late"}, "options": [{"optionId": "y", "name": "A"}]})
+    assert asyncio.run(go()) == {"outcome": {"outcome": "cancelled"}} and t.questions == []
+
+
+def test_long_handover_keeps_its_start_and_a_pointer(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step(), step("claude", "sonnet")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+    long = "WARNING: deploy only after the migration.\n" + "detail\n" * 2000 + "END-MARK"
+    FakeChild.script = [("a.py", "v\n", long), ("b.html", "<p/>\n", "ok")]
+    run(repo)
+    brief2 = FakeChild.started[1].prompts[0]
+    assert "WARNING: deploy only after the migration." in brief2 and "END-MARK" in brief2
+    saved = list((repo / ".claudex/sessions/t/handovers").glob("*.md"))
+    assert saved and saved[0].read_text().startswith("WARNING") and str(saved[0]) in brief2
+
+
+def test_log_from_a_subfolder_finds_the_repo_memory(job, capsys):
+    from composer import tools
+    repo, calls, answers = job
+    (repo / "web").mkdir()
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+    FakeChild.script = [("a.py", "v\n", "ok")]          # the worker runs inside web/
+    e, ui, stop = run(repo / "web")
+    capsys.readouterr()
+    tools.show_log(str(repo / "web"), 5)
+    out = capsys.readouterr().out
+    assert "step 1" in out, ui.all() + str(list((repo / ".claudex").rglob("*")))
+
+
+def test_huge_output_never_wipes_the_screen(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t._add("sys", "hello")
+    t._add("codex", "y" * (T.TOTAL_CHARS + 10))
+    assert t.blocks and t.blocks[-1]["who"] == "codex" and len(t.blocks[-1]["text"]) == T.BLOCK_CHARS

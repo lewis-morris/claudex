@@ -194,8 +194,10 @@ def show_rules(edit=False):
 
 
 def show_log(cwd, n):
+    from .engine import repo_root
     rows = []
-    for f in (pathlib.Path(cwd) / ".claudex" / "sessions").glob("*/steps.jsonl"):
+    root = repo_root(cwd) or cwd                 # Claudex keeps one memory per repository
+    for f in (pathlib.Path(root) / ".claudex" / "sessions").glob("*/steps.jsonl"):
         for l in f.read_text().splitlines():
             try:
                 rows.append({**json.loads(l), "_session": f.parent.name})

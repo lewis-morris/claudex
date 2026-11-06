@@ -19,7 +19,7 @@ RULES = pathlib.Path(os.environ.get("CLAUDEX_RULES") or os.environ.get("COMPOSER
 CATALOG = pathlib.Path.home() / ".config/agent-of-empires/acp_option_catalog.json"
 NOTES_LIMIT = 8000
 MEMORY_LIMIT = 6000
-JOURNAL_LIMIT = 5000
+JOURNAL_LIMIT = 12000
 INSTRUCTIONS_LIMIT = 40000   # per file; house rules are never cut silently
 HANDOFF_LIMIT = 1500         # each worker's handover kept for the rest of the job and in the journal
 INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")  # Claude reads one, Codex the other; Claudex shows both to everyone
@@ -221,9 +221,23 @@ class Engine:
         return (f"PROJECT INSTRUCTIONS (CLAUDE.md and AGENTS.md; follow both):\n{self._instructions()}\n\n"
                 f"PROJECT MAP:\n{self._read(self.map, MEMORY_LIMIT)}\n\n"
                 f"PAST DECISIONS:\n{self._read(self.decisions, MEMORY_LIMIT)}\n\n"
-                f"RECENT JOBS IN THIS PROJECT (all sessions):\n{self._read(self.journal, JOURNAL_LIMIT)}\n\n"
+                f"RECENT JOBS IN THIS PROJECT (all sessions; older ones are in {self.journal}):\n"
+                f"{self._read(self.journal, JOURNAL_LIMIT)}\n\n"
                 f"THIS JOB SO FAR (every handover and check, never trimmed):\n{self._job_so_far()}\n\n"
                 f"THIS SESSION'S EARLIER NOTES:\n{self._read(self.notes, NOTES_LIMIT)}")
+
+    def _keep_handover(self, i, attempt, agent, out):
+        """Save the whole handover to a file; memory gets its start and end (warnings are often up front)
+        plus where to read the rest."""
+        out = out.strip()
+        if len(out) <= HANDOFF_LIMIT * 2:
+            return out
+        path = self.notes_dir / "handovers" / f"step{i}-try{attempt}-{agent}.md"
+        if not self.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(out + "\n")
+        return (out[:HANDOFF_LIMIT] + f"\n[… middle omitted; the whole handover is in {path} …]\n"
+                + out[-HANDOFF_LIMIT:])
 
     def _job_so_far(self):
         if not self._job or not self._job["rows"]:
@@ -635,7 +649,7 @@ class Engine:
                                          f"\n{out}\n\n")
                 row = dict(kind="step", step=i, title=s["title"], agent=agent, model=model, effort=effort,
                            attempt=attempt, secs=secs, stop=stop, browser=s["browser"],
-                           handoff=tail(out.strip(), HANDOFF_LIMIT))
+                           handoff=self._keep_handover(i, attempt, agent, out))
                 if stop == "cancelled" or self.cancelled:
                     self._log(**row)
                     self.cancelled = True
