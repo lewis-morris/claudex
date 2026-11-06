@@ -596,3 +596,61 @@ def test_everyone_shares_one_memory(job):
     assert "HANDOFF-FROM-CODEX" in briefs[1] and "HANDOFF-FROM-CODEX" in prompts["final"][0]
     journal = (repo / ".claudex/project/journal.md").read_text()
     assert "session A" in journal and "session B" in journal and "calc.py" in journal
+
+
+# ---------- the full-screen app ----------
+def _tui(tmp_path):
+    from composer import tui as T
+    T.PREFS = tmp_path / "ui.json"
+    e = engine.Engine(str(tmp_path), None, settings={}, session_key="t")
+    t = T.TUI(e)
+    e.ui = t
+    return T, t, e
+
+
+def test_tui_takes_everything_the_engine_sends(tmp_path):
+    T, t, e = _tui(tmp_path)
+
+    async def go():
+        await t.say("_Planning…_\n")
+        await t.plan([{"content": "Sums · Codex", "status": "in_progress", "priority": "medium"}])
+        t.activity("codex", "working")
+        await t.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "done it"}})
+        await t.update({"sessionUpdate": "tool_call", "toolCallId": "x", "title": "Edit calc.py"})
+    asyncio.run(go())
+    text = "".join(x for _, x in t.transcript())
+    assert "Planning" in text and "Codex" in text and "done it" in text and "Edit calc.py" in text
+    assert "Sums" in "".join(x for _, x in t.plan_text())
+
+
+def test_tui_draws_every_state_layout_and_colour(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+    for palette in T.PALETTES:
+        t.prefs["palette"] = palette
+        t.style()
+        for animate in (True, False):
+            t.prefs["animate"] = animate
+            for who, st, tgt in [(None, "idle", None), ("lead", "thinking", None), ("codex", "working", None),
+                                 ("claude", "reviewing", "codex"), ("claude", "pass", "codex"),
+                                 ("codex", "fix", "claude"), (None, "done", None), (None, "stopped", None)]:
+                t.activity(who, st, tgt)
+                for w, h in ((44, 10), (150, 10), (30, 6)):
+                    lines = t.draw_stage(w, h)
+                    assert len(lines) == h and all(sum(len(x) for _, x in ln) == w for ln in lines)
+    for layout in T.LAYOUTS:
+        t.prefs["layout"] = layout
+        t.app.layout.container.content.get_children()  # builds without error
+
+
+def test_tui_permission_is_answered_by_typing_a_number(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+
+    async def go():
+        ask = asyncio.ensure_future(t.permission({"toolCall": {"title": "rm -rf build"}, "options": [
+            {"optionId": "yes", "name": "Allow"}, {"optionId": "no", "name": "Deny", "kind": "reject_once"}]}))
+        await asyncio.sleep(0)
+        t.on_accept(type("TypedLine", (), {"text": "2"})())
+        return await ask
+    assert asyncio.run(go()) == {"outcome": {"outcome": "selected", "optionId": "no"}}

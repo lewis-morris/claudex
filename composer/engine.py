@@ -177,6 +177,15 @@ class Engine:
         self._append(self.log, json.dumps({"at": datetime.datetime.now().isoformat(timespec="seconds"),
                                            **row}) + "\n")
 
+    def _act(self, who, state, target=None):
+        """Tell a screen that wants to know (the full-screen UI) who is doing what right now."""
+        f = getattr(self.ui, "activity", None)
+        if f:
+            try:
+                f(who, state, target)
+            except Exception:
+                pass
+
     def _instructions(self):
         """The project's own agent instructions. Claude only reads CLAUDE.md and Codex only AGENTS.md, so both
         are shown to everyone: one set of house rules for the whole team."""
@@ -338,11 +347,13 @@ class Engine:
             self._job = {"at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M"), "request": text, "rows": []}
             stop = await self._turn(text, rules)
             self._write_journal("done" if self.ok and stop == "end_turn" else "stopped")
+            self._act(None, "done" if self.ok and stop == "end_turn" else "stopped")
             return stop
         except asyncio.CancelledError:
             self._clear_our_cancel()
             self.ok, self.cancelled = False, True
             self._write_journal("stopped")
+            self._act(None, "stopped")
             await self.ui.say("\n\n_Stopped._\n")
             return "cancelled"
         finally:
@@ -364,6 +375,7 @@ class Engine:
             plan = self._single(text, forced, rules, f"you chose {forced.title()} only")
         else:
             agent, model, effort = self._lead(rules)
+            self._act("lead", "thinking")
             await self.ui.say(f"_{fun.pick(fun.PLANNING)}… (lead: {agent.title()} {model}, {effort})_\n\n")
             try:
                 plan = await self.plan(text, rules)
@@ -446,6 +458,7 @@ class Engine:
         decisions = plan["big_decisions"]
         await self.ui.say("**Big decisions in this plan:**\n" +
                           "".join(f"- {d['decision']} ({d['why']})\n" for d in decisions) + "\n")
+        self._act(other(self._lead(rules)[0]), "checking", "lead")
         try:
             who, r, op = await self.second_opinion(text, plan, rules)
         except Exception as e:
@@ -554,6 +567,7 @@ class Engine:
                 else:
                     await self.ui.say(f"{head} · attempt {attempt}\n\n")
                 started = asyncio.get_running_loop().time()
+                self._act(agent, "working")
                 self.active = c
                 try:
                     stop, out = await asyncio.wait_for(c.prompt(message), step_timeout)
@@ -625,6 +639,7 @@ class Engine:
     async def _review(self, s, text, out, diff, files, truncated, rules):
         who = other(s["agent"])
         r = rules["reviewers"][who]
+        self._act(who, "reviewing", s["agent"])
         await self.ui.say(f"_{fun.pick(fun.REVIEWING)}: {who.title()} {r['model']} ({r['effort']})…_ ")
         prompt = (
             "You are reviewing changes another AI agent just made, as a strict senior engineer. You may read "
@@ -645,6 +660,7 @@ class Engine:
                 return {"verdict": "unreviewed", "issues": [], "summary": f"review unavailable: {e}"}
             raise StepFailed(f"the review couldn't run ({e}). The changes are in place but unchecked. "
                              "Run `claudex doctor`.")
+        self._act(who, "pass" if v["verdict"] == "pass" else "fix", s["agent"])
         if v["verdict"] == "pass":
             await self.ui.say(f"passed. {v['summary']}\n\n")
         else:
@@ -661,6 +677,7 @@ class Engine:
             self.ok = False
             await self.ui.say(f"**Final check couldn't run:** {e}\n")
             return
+        self._act("lead", "thinking")
         await self.ui.say(f"_Final check by the lead ({agent.title()} {model})…_ ")
         prompt = (
             "You led this job. All steps are done and each was reviewed. Check that the parts fit together and "

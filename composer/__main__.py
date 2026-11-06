@@ -33,6 +33,7 @@ def chat_parser():
     ap.add_argument("--lead-effort", choices=["low", "medium", "high", "xhigh"], help="reasoning for the lead")
     ap.add_argument("--rules", help="use a different rules file")
     ap.add_argument("--dry-run", action="store_true", help="show the plan and who'd do each part; change nothing")
+    ap.add_argument("--plain", action="store_true", help="simple line-by-line chat instead of the full screen")
     return ap
 
 

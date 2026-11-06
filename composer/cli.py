@@ -257,6 +257,9 @@ async def run(args, settings):
             stop = await eng.turn(text)
             print()
             return 0 if eng.ok and stop == "end_turn" else 1
+        if sys.stdin.isatty() and sys.stdout.isatty() and not getattr(args, "plain", False):
+            from .tui import run_tui
+            return await run_tui(eng)
         await chat(eng)
         return 0
     finally:
