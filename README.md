@@ -21,7 +21,7 @@ One lead decides, for each part of a job, whether **Claude Code** or **Codex** d
    - Codex via `codex-acp`.
    - Messages, tool cards and permission questions pass straight through, and the plan shows its progress.
    - Each agent keeps its own conversation for the whole session.
-3. **Shared memory:** `.composer/notes.md` in the project folder holds every request and each step's handoff. `.composer/steps.jsonl` logs agent, model, effort, time and outcome for each step. The folder is hidden from git via `.git/info/exclude`.
+3. **Shared memory:** `.composer/<AoE session id or "terminal">/notes.md` in the project folder holds every request and each step's handoff. `.composer/steps.jsonl` logs agent, model, effort, time and outcome for each step. The folder is hidden from git via `.git/info/exclude`.
 
 ## Keeping it current
 

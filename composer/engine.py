@@ -63,17 +63,29 @@ class Engine:
         self.children = {}
         self.active = None
         self.cancelled = False
-        self.notes_dir = pathlib.Path(self.cwd) / ".composer"
+        # One notes folder per AoE session (stable across worker restarts), so parallel
+        # sessions in the same project don't read each other's handoffs.
+        aoe_dir = os.environ.get("AOE_ARTIFACT_DIR")
+        key = pathlib.Path(aoe_dir).name if aoe_dir else "terminal"
+        self.notes_dir = pathlib.Path(self.cwd) / ".composer" / key
         self.notes = self.notes_dir / "notes.md"
         self.log = self.notes_dir / "steps.jsonl"
 
     # ---------- shared memory ----------
     def _prepare_notes(self):
-        self.notes_dir.mkdir(exist_ok=True)
-        exclude = pathlib.Path(self.cwd) / ".git" / "info" / "exclude"
-        if exclude.parent.is_dir():  # keep notes out of git without touching tracked files
+        self.notes_dir.mkdir(parents=True, exist_ok=True)
+        # Keep notes out of git without touching tracked files. `--git-path` also works in
+        # worktrees (where .git is a file) and subfolders; the pattern matches at any depth.
+        try:
+            rel = subprocess.run(["git", "rev-parse", "--git-path", "info/exclude"], cwd=self.cwd,
+                                 capture_output=True, text=True, timeout=10).stdout.strip()
+        except Exception:
+            rel = ""
+        if rel:
+            exclude = pathlib.Path(self.cwd) / rel
+            exclude.parent.mkdir(parents=True, exist_ok=True)
             text = exclude.read_text() if exclude.exists() else ""
-            if ".composer/" not in text:
+            if ".composer/" not in text.split():
                 exclude.write_text(text + ("" if text.endswith("\n") or not text else "\n") + ".composer/\n")
 
     def _notes_tail(self):
