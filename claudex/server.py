@@ -1,5 +1,6 @@
 """Claudex as an ACP agent (for Agents of Empires' structured view, Zed, etc.)."""
 import asyncio
+import json
 import os
 import sys
 import pathlib
@@ -25,6 +26,28 @@ def config_options(e):
                [(v, "Auto (per step)" if v == "auto" else v.title()) for v in EFFORTS]),
         select("checks", "Checks", "other", e.checks, list(CHECKS.items())),
     ]
+
+
+SESSIONS_DIR = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() / ".local/share")) / "claudex/acp-sessions"
+
+
+def save_session_meta(sid, e):
+    """What a restarted session needs to carry on: its folder, its memory key and its pickers."""
+    try:
+        SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
+        (SESSIONS_DIR / f"{sid}.json").write_text(json.dumps({
+            "cwd": e.cwd, "key": e.session_key,
+            "settings": {"route": e.route, "effort": e.effort, "mode": e.mode, "checks": e.checks,
+                         "models": e.models_file, "rules": e.rules_path}}))
+    except Exception:
+        pass
+
+
+def load_session_meta(sid):
+    try:
+        return json.loads((SESSIONS_DIR / f"{sid}.json").read_text()) if sid and "/" not in sid else {}
+    except Exception:
+        return {}
 
 
 class SessionUI:
@@ -56,18 +79,30 @@ class Server:
     async def on_request(self, method, p):
         if method == "initialize":
             return {"protocolVersion": 1,
-                    "agentCapabilities": {"loadSession": False,
+                    "agentCapabilities": {"loadSession": True,
                                           "promptCapabilities": {"image": False, "audio": False,
                                                                  "embeddedContext": True},
                                           "mcpCapabilities": {"http": True, "sse": False}},
                     "authMethods": [],
                     "agentInfo": {"name": "claudex", "title": "Claudex", "version": __version__}}
-        if method == "session/new":
-            sid = "claudex-" + uuid.uuid4().hex[:16]
-            key = None if os.environ.get("AOE_ARTIFACT_DIR") else sid
-            e = Engine(p.get("cwd") or ".", SessionUI(self.peer, sid), p.get("mcpServers") or [],
-                       settings=self.settings, session_key=key)
+        if method in ("session/new", "session/load"):
+            # session/load: Agents of Empires restarting a session it already knows (it keeps the conversation
+            # itself). Claudex picks the same session back up: same memory and notes, same pickers.
+            loading = method == "session/load"
+            sid = p.get("sessionId") if loading else "claudex-" + uuid.uuid4().hex[:16]
+            if not sid:
+                raise RpcError(-32602, "session/load needs a sessionId")
+            if loading and sid in self.sessions:
+                e = self.sessions[sid]
+                return {"configOptions": config_options(e)}
+            saved = load_session_meta(sid) if loading else {}
+            cwd = p.get("cwd") or saved.get("cwd") or "."
+            key = saved.get("key") or (None if os.environ.get("AOE_ARTIFACT_DIR") else sid)
+            e = Engine(cwd, SessionUI(self.peer, sid), p.get("mcpServers") or [],
+                       settings=dict(self.settings, **{k: v for k, v in saved.get("settings", {}).items() if v}),
+                       session_key=key)
             self.sessions[sid] = e
+            save_session_meta(sid, e)
             e.skills = load_skills()
             # Fill Agents of Empires' `/` menu once the session exists (just after this reply).
             # call_soon runs after this handler returns, and the reply is written as it returns, so the
@@ -75,6 +110,8 @@ class Server:
             asyncio.get_running_loop().call_soon(lambda: self.peer.notify("session/update", {
                 "sessionId": sid, "update": {"sessionUpdate": "available_commands_update",
                                              "availableCommands": acp_commands(e.skills)}}))
+            if loading:
+                return {"configOptions": config_options(e)}
             return {"sessionId": sid, "configOptions": config_options(e)}
         e = self.sessions.get(p.get("sessionId"))
         if e is None:
@@ -87,10 +124,12 @@ class Server:
             if valid is None or val not in valid:
                 raise RpcError(-32602, f"unknown option {cid}={val}")
             setattr(e, OPTION_ATTR[cid], val)
+            save_session_meta(p.get("sessionId"), e)
             return {"configOptions": config_options(e)}
         if method == "session/set_mode":
             if p.get("modeId") in MODES or p.get("modeId") in LEGACY_MODES:
                 e.mode = norm_mode(p["modeId"])
+                save_session_meta(p.get("sessionId"), e)
             return {}
         if method == "session/prompt":
             said, attached = [], []

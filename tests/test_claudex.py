@@ -1456,3 +1456,27 @@ def test_warm_index_sees_deletions_and_new_ignores(tmp_path):
     (root / "secret.txt").write_text("changed")
     d = gitsnap.snapshot(str(root))
     assert gitsnap.changed_files(str(root), c, d) == []
+
+
+def test_acp_session_can_be_reloaded(tmp_path, monkeypatch):
+    """Agents of Empires restarts a session with session/load: same memory key and the same pickers."""
+    from claudex import server
+    monkeypatch.setattr(server, "SESSIONS_DIR", tmp_path / "sessions")
+    monkeypatch.delenv("AOE_ARTIFACT_DIR", raising=False)
+    srv = _server_session(tmp_path)
+
+    async def first():
+        init = await srv.on_request("initialize", {"protocolVersion": 1})
+        sid = (await srv.on_request("session/new", {"cwd": str(tmp_path), "mcpServers": []}))["sessionId"]
+        await srv.on_request("session/set_config_option", {"sessionId": sid, "configId": "checks", "value": "reviews"})
+        return init, sid, srv.sessions[sid].session_key
+    init, sid, key = asyncio.run(first())
+    assert init["agentCapabilities"]["loadSession"] is True
+    fresh = _server_session(tmp_path)                       # a new worker process after a restart
+
+    async def again():
+        res = await fresh.on_request("session/load", {"sessionId": sid, "cwd": str(tmp_path), "mcpServers": []})
+        return res, fresh.sessions[sid]
+    res, e = asyncio.run(again())
+    assert e.session_key == key and e.checks == "reviews"
+    assert next(o for o in res["configOptions"] if o["id"] == "checks")["currentValue"] == "reviews"

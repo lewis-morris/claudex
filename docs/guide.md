@@ -247,6 +247,9 @@ claudex = "claudex --acp"
 Pick **claudex** for a session: Routing, Effort, Mode and Checks are pickers, and the `/` menu has the same
 commands (`/models`, `/permissions`, `/usage`, `/memory`, `/shared`, `/init`…) and your skills.
 
+**Restarting a session keeps its conversation.** Claudex supports Agents of Empires' session reload, so a
+restarted Claudex session carries on with the same memory, notes and pickers (no `ctx:no` badge).
+
 **Keeping sessions current.** A new session always runs the Claudex you have now. One that was already open
 when Claudex changed tells you before its next job; `claudex doctor` lists every such session with the command
 to restart it (`aoe acp stop <id>`: it comes straight back on your next message).
