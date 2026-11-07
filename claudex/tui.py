@@ -335,6 +335,15 @@ def _md(text, base, width=100):
     return out
 
 
+# How a reply's check shows next to the name. Until the other agent agrees, the reply is a draft (dimmed).
+CHECK_MARKS = {
+    "checking": ("class:ask bold", "⏳ draft: {by} is checking it, hold off acting on it"),
+    "pass": ("class:good bold", "✓ checked: {by} agrees"),
+    "fix": ("class:stop bold", "✗ {by} asked for changes: the fixed version follows"),
+    "unchecked": ("class:dim", "⚠ not checked ({by})"),
+}
+
+
 class TUI:
     NAMES = {"you": "You", "lead": "Lead", "claude": "Claude", "codex": "Codex", "sys": "Claudex"}
 
@@ -539,6 +548,15 @@ class TUI:
 
     def _doing(self, what):
         self.live["now"] = what
+        self._refresh()
+
+    def check_mark(self, who, state, by):
+        """The other agent's check on a reply: a draft until it agrees. Marks the worker's latest reply."""
+        for b in reversed(self.blocks):
+            if b["who"] == who:
+                b["check"] = [state, by]
+                break
+        self.version += 1
         self._refresh()
 
     def activity(self, who, state, target=None, how=None):
@@ -854,8 +872,13 @@ class TUI:
                 frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}"))
                 if b.get("how"):
                     frags.append(("class:dim", f" · {b['how']}"))
+                mark = CHECK_MARKS.get((b.get("check") or [None])[0])
+                if mark:
+                    frags.append((mark[0], "   " + mark[1].format(by=b["check"][1])))
                 frags.append(("", "\n"))
-            frags.extend(_md(b["text"].strip("\n"), {"sys": "class:sys", "stop": "class:stop", "ask": "class:ask"}.get(who, "class:body"),
+            draft = (b.get("check") or [None])[0] in ("checking", "fix")      # not agreed yet: shown dimmed
+            frags.extend(_md(b["text"].strip("\n"), "class:sys" if draft else
+                             {"sys": "class:sys", "stop": "class:stop", "ask": "class:ask"}.get(who, "class:body"),
                              self._chat_width()))
             frags.append(("", "\n\n"))
         if not frags:

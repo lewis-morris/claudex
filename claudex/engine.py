@@ -63,6 +63,18 @@ PLAN_SCHEMA = headless.strict({"type": "object", "properties": {
 OPINION_SCHEMA = {"type": "object", "properties": {
     "verdict": {"enum": ["agree", "concerns"]}, "concerns": {"type": "array", "items": {"type": "string"}},
     "suggestion": {"type": "string"}}}
+# One shape for every worker's reply, whichever agent wrote it: easier to read, and shorter for the checker.
+REPLY_SHAPE = (
+    "Your reply is shown to the user as it is, and the other agent checks it before they act on it. If you "
+    "changed files, end with this, in plain British English, leaving out any line that would be empty:\n"
+    "**Done:** one or two sentences on the outcome.\n"
+    "**Changed:** a short bullet per file: what changed (a table only if before/after needs comparing).\n"
+    "**Checked:** what you ran or read to confirm it, and the result.\n"
+    "**Not checked:** anything you couldn't confirm, or assumed.\n"
+    "**Needs you:** a decision or action for the user, if any.\n"
+    "No preamble, no restating the request, no closing offers; keep it under about 250 words unless a table "
+    "is needed. If you only answered a question, just answer it.")
+DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".adoc"}
 REVIEW_SCHEMA = {"type": "object", "properties": {
     "verdict": {"enum": ["pass", "fix"]}, "issues": {"type": "array", "items": {"type": "string"}},
     "summary": {"type": "string"}}}
@@ -826,8 +838,7 @@ class Engine:
             f"If you hit a hard-to-undo decision the plan didn't settle (database schema, new dependency, "
             f"sign-in, money logic, deleting data), stop and write a line starting '{DECISION_TAG}' explaining "
             "the choice and options, instead of guessing.\n"
-            "If you changed files, end with a short handoff: what you changed (files), what you checked and the "
-            "result, and anything the next agent must know. If you only answered a question, just answer it.")
+            + REPLY_SHAPE)
 
     async def _configure(self, c, s, rules, model, effort):
         agent = base(c.name)
@@ -946,10 +957,17 @@ class Engine:
                 if (not self.reviews_on or not review.get("enabled", True)
                         or (review.get("skip_low_effort", False) and effort == "low")):
                     self._log(**row, verdict="not_reviewed", files=files)
+                    self._mark(agent, "unchecked", "checks are off")
                     return True
-                verdict = await self._review(s, text, out, diff, files, truncated, rules)
-                self._log(**row, verdict=verdict["verdict"], issues=verdict["issues"], files=files)
+                tier = self._review_tier(files, review)
+                try:
+                    verdict = await self._review(s, text, out, diff, files, truncated, rules, tier)
+                except BaseException:
+                    self._mark(agent, "unchecked", "the check didn't finish")
+                    raise
+                self._log(**row, verdict=verdict["verdict"], issues=verdict["issues"], files=files, review=tier)
                 if self.cancelled:
+                    self._mark(agent, "unchecked", "stopped")
                     raise StepFailed("cancelled.")
                 if verdict["verdict"] in ("pass", "unreviewed"):
                     return True
@@ -968,16 +986,39 @@ class Engine:
             if chrome:
                 chrome.release()
 
-    async def _review(self, s, text, out, diff, files, truncated, rules):
+    @staticmethod
+    def _review_tier(files, review):
+        """'light' when every changed file is writing (docs, notes, text), so a quicker, cheaper model checks it;
+        'full' for anything else. Code always gets the full check."""
+        if not review.get("light_for_docs", True) or not files:
+            return "full"
+        docs = all(pathlib.PurePosixPath(f).suffix.lower() in DOC_SUFFIXES for f in files)
+        return "light" if docs and review.get("light") else "full"
+
+    def _mark(self, agent, state, by):
+        f = getattr(self.ui, "check_mark", None)
+        if f:
+            try:
+                f(agent, state, by)
+            except Exception:
+                pass
+
+    async def _review(self, s, text, out, diff, files, truncated, rules, tier="full"):
         who = other(s["agent"])
         r = rules["reviewers"][who]
+        light = (rules.get("review", {}).get("light") or {}).get(who) if tier == "light" else None
+        if light:
+            r = dict(r, **light)
         self._act(who, "reviewing", s["agent"], r["model"], r["effort"])
-        await self.ui.say(f"_{fun.pick(fun.REVIEWING)}: {who.title()} {r['model']} ({r['effort']})…_ ")
+        self._mark(s["agent"], "checking", f"{who.title()} {r['model']}")
+        await self.ui.say(f"_{fun.pick(fun.REVIEWING)}: {who.title()} {r['model']} ({r['effort']})"
+                          f"{', a lighter check as only writing changed' if light else ''}…_ ")
         prompt = (
             "You are reviewing changes another AI agent just made, as a strict senior engineer. You may read "
             "project files (read-only). Say 'fix' only for real problems: bugs, missed requirements, broken "
-            "contracts with other parts, security issues, or untested risky logic. Don't ask for style changes. "
-            "Each issue must be concrete and actionable.\n\n"
+            "contracts with other parts, security issues, untested risky logic, or claims in the reply or the "
+            "files that aren't true. Don't ask for style changes. Each issue must be concrete and actionable. "
+            "Keep the summary to one or two sentences.\n\n"
             f"USER MESSAGE:\n{text}\n\nTHE STEP IT WAS GIVEN:\n{s['title']}\n{s['instructions']}\n\n"
             f"SHARED PROJECT MEMORY (judge against these rules and decisions too):\n{self._memory_block()}\n\n"
             f"WORKER'S HANDOFF:\n{tail(out, 4000)}\n\n{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n\n"
@@ -995,11 +1036,13 @@ class Engine:
                 who, r = used, {"model": m, "effort": ef}
         except Exception as e:
             if self._carry_on(rules):
+                self._mark(s["agent"], "unchecked", "the check couldn't run")
                 await self.ui.say(f"\n_(Review unavailable: {e}. Carrying on unreviewed, as the rules allow.)_\n\n")
                 return {"verdict": "unreviewed", "issues": [], "summary": f"review unavailable: {e}"}
             raise StepFailed(f"the review couldn't run ({e}). The changes are in place but unchecked. "
                              "Run `claudex doctor`.")
         self._act(who, "pass" if v["verdict"] == "pass" else "fix", s["agent"])
+        self._mark(s["agent"], "pass" if v["verdict"] == "pass" else "fix", f"{who.title()} {r['model']}")
         if v["verdict"] == "pass":
             await self.ui.say(f"passed. {v['summary']}\n\n")
         else:

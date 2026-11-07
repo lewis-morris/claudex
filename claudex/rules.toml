@@ -20,6 +20,9 @@ enabled = true
 max_attempts = 3          # 1st try, fix once at the same level, then one step up the ladder
 skip_low_effort = false   # true: low-effort steps aren't reviewed (cheaper, less safe)
 diff_limit = 60000        # characters of diff sent to the reviewer (it's told if it was cut short)
+light_for_docs = true     # a step that only changed writing (.md, .txt, docs) gets a quicker, cheaper check
+# Who does that lighter check (the other side from the worker, as always). Code always gets the full reviewers.
+light = { claude = { model = "sonnet", effort = "medium" }, codex = { model = "gpt-6.1-sol", effort = "medium" } }
 
 [checks]
 if_unavailable = "stop"   # if a review/second opinion can't run (login, model, timeout): "stop" or "continue"

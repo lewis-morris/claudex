@@ -35,6 +35,11 @@ need both, and the best results come when someone *else* checks the work. Claude
 - **Every change is reviewed by the other agent** (with reviews on, the default). Problems go back to the same worker; if they keep failing,
   it steps up to a stronger model; then it stops and tells you what's still wrong. (If the other agent is at
   its usage limit, the same side checks instead, and Claudex says so in bold.)
+- **A reply is a draft until the other agent agrees.** While the check runs, the reply is dimmed with
+  *⏳ draft: Codex is checking it*; then it turns to *✓ checked: Codex agrees*, or *✗ asked for changes*
+  with the fixed version below. Plain answers that change no files aren't checked, and a step that only
+  changed writing (.md, .txt) gets a lighter, cheaper check (`[review] light` in the rules). Every worker
+  ends with the same short shape: Done, Changed, Checked, Not checked, Needs you.
 - **One shared memory.** Everyone (lead, workers, reviewers) sees the same project map, past decisions,
   a journal of every job from every session, each worker's handover, and *both* `CLAUDE.md` and `AGENTS.md`.
 - **Its own permission rules, with a gatekeeper.** Workers ask before acting; Claudex answers from one set

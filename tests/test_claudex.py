@@ -1686,3 +1686,33 @@ def test_names_show_model_and_reasoning(tmp_path):
         return "".join(x for _, x in t.transcript()), "".join(x for _, x in t.status())
     shown, bar = asyncio.run(go())
     assert "● Claude · sonnet · medium" in shown and "Claude (sonnet · medium) is working" in bar
+
+
+def test_reply_is_a_draft_until_the_other_agent_agrees(tmp_path):
+    T, t, e = _tui(tmp_path)
+
+    async def go():
+        t.activity("claude", "working", None, "opus · medium")
+        await t.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "**Done:** it"}})
+        t.check_mark("claude", "checking", "Codex gpt-6-astra")
+        during = "".join(x for _, x in t.transcript())
+        styles = [st for st, x in t.transcript() if "it" == x.strip()]
+        t.check_mark("claude", "pass", "Codex gpt-6-astra")
+        return during, styles, "".join(x for _, x in t.transcript())
+    during, styles, after = asyncio.run(go())
+    assert "⏳ draft: Codex gpt-6-astra is checking it" in during
+    assert "✓ checked: Codex gpt-6-astra agrees" in after and "draft" not in after
+
+
+def test_writing_only_changes_get_the_lighter_check():
+    from claudex.engine import Engine
+    review = {"light_for_docs": True, "light": {"codex": {"model": "gpt-6.1-sol", "effort": "medium"}}}
+    assert Engine._review_tier(["docs/plan.md", "NOTES.txt"], review) == "light"
+    assert Engine._review_tier(["docs/plan.md", "app.py"], review) == "full"
+    assert Engine._review_tier(["docs/plan.md"], dict(review, light_for_docs=False)) == "full"
+
+
+def test_workers_are_asked_for_one_reply_shape():
+    from claudex.engine import REPLY_SHAPE
+    for part in ("**Done:**", "**Changed:**", "**Checked:**", "**Not checked:**", "**Needs you:**"):
+        assert part in REPLY_SHAPE
