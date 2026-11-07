@@ -324,7 +324,7 @@ def show_models(cwd=".", init_file=False, edit=False, global_=False, models_file
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(models.render(load_rules(project_root=None if global_ else root,
-                                                       models_file=models_file)))
+                                                       models_file=None if global_ else models_file)))
             print(f"Made {target} from the rules in force: edit it to change who does what"
                   + ("" if global_ else " in this project") + ".")
         if edit:

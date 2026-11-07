@@ -233,7 +233,7 @@ def work_report(since, project=None):
                         why = (r.get("why") or r.get("title") or "").strip()
                         if len(why) > 160:              # shorten the reason, never the handover part
                             base_, _, handed = why.partition(" (handed")
-                            why = base_[:110].rstrip() + "…" + ((" (handed" + handed)[:120] if handed else "")
+                            why = base_[:110].rstrip() + "…" + (" (handed" + handed if handed else "")
                         if why:
                             reasons[key][why] += 1
                 elif kind in ("second_opinion", "final_check"):

@@ -90,17 +90,18 @@ def hidden_tests(task, folder):
     expected = int(task.get("expected_tests", 0))
     env = {k: v for k, v in tool_env().items() if not k.startswith("PYTEST")}
     # -E: ignore PYTHON* settings; -P: don't put the current folder first on the import path
+    mark = uuid.uuid4().hex
     proc = subprocess.Popen([sys.executable, "-E", "-P", "-c", RUNNER, str(folder), str(tests), str(ini), str(xml)],
-                            cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
-                            start_new_session=True)
+                            cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            env=dict(env, **{MARK: mark}), start_new_session=True)
     try:
         proc.communicate(timeout=300)
         exit_code = proc.returncode
     except subprocess.TimeoutExpired:
         _stop_group(proc)
-        _stop_in(folder)
+        _stop_in(folder, mark)
         return {"passed": 0, "failed": expected, "total": expected, "pct": 0.0, "note": "hidden tests timed out"}
-    _stop_in(folder)
+    _stop_in(folder, mark)
     passed = failed = 0
     try:
         for case in ET.parse(xml).getroot().iter("testcase"):
