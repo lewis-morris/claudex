@@ -1716,3 +1716,27 @@ def test_workers_are_asked_for_one_reply_shape():
     from claudex.engine import REPLY_SHAPE
     for part in ("**Done:**", "**Changed:**", "**Checked:**", "**Not checked:**", "**Needs you:**"):
         assert part in REPLY_SHAPE
+
+
+def test_a_no_from_claudex_is_not_a_stop(job):
+    """Codex's only 'no' ends its turn as cancelled: Claudex tells it why and it carries on, the job goes on."""
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["gate"] = {"decision": "deny", "reason": "not needed for this step"}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+
+    async def asks_then_cancelled(c):
+        await c.decide(_req("execute", "python3 -m venv .venv"))
+        return "cancelled", "I'll make a virtualenv."
+    FakeChild.script = [asks_then_cancelled, ("a.py", "x\n", "Done without it.")]
+    e, ui, stop = run(repo)
+    w = FakeChild.started[0]
+    assert e.ok and stop == "end_turn" and "Stopped" not in ui.all()
+    assert "Claudex said no to" in w.prompts[1] and "not needed for this step" in w.prompts[1]
+
+
+def test_read_only_claude_calls_are_not_in_plan_mode():
+    cmd = headless.claude_cmd("sonnet", "low", {}, "Read,Grep,Glob")
+    assert "plan" not in cmd and cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
+    assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep,Glob"
+    assert "--allowedTools" not in headless.claude_cmd("sonnet", "low", {}, "")

@@ -74,6 +74,7 @@ REPLY_SHAPE = (
     "**Needs you:** a decision or action for the user, if any.\n"
     "No preamble, no restating the request, no closing offers; keep it under about 250 words unless a table "
     "is needed. If you only answered a question, just answer it.")
+REFUSAL_RETRIES = 3       # how many times a worker whose turn ended on a 'no' is told why and carries on
 DOC_SUFFIXES = {".md", ".markdown", ".txt", ".rst", ".adoc"}
 REVIEW_SCHEMA = {"type": "object", "properties": {
     "verdict": {"enum": ["pass", "fix"]}, "issues": {"type": "array", "items": {"type": "string"}},
@@ -165,6 +166,7 @@ from .limits import error_is_limit, reply_is_limit, reset_hint  # noqa: E402
 
 class Engine:
     def __init__(self, cwd, ui, mcp_servers=None, settings=None, session_key=None):
+        self.refusals = []          # actions Claudex said no to (so a worker can be told why)
         s = settings or {}
         self.cwd = str(cwd)
         self.ui = ui
@@ -432,6 +434,8 @@ class Engine:
         def answer(decision, by, why):
             permissions.log_decision(log, agent=agent, kind=kind, what=what[:300], decision=decision, by=by,
                                      why=why[:300], mode=self.mode, session=self.session_key)
+            if decision != "allow":     # kept so the worker can be told why, if saying no ends its turn
+                self.refusals.append({"agent": agent, "what": what[:300], "why": why[:300], "by": by})
             return permissions.pick_option(opts, decision)
 
         async def human(why):
@@ -598,6 +602,7 @@ class Engine:
     # ---------- one message ----------
     async def turn(self, text):
         self.cancelled, self.ok = False, True
+        self.refusals = []
         self._task = asyncio.current_task()
         rules = load_rules(self.rules_path, self.project_root, self.models_file)
         self._rules = rules
@@ -896,7 +901,7 @@ class Engine:
                 self._act(agent, "working", model=model, effort=effort)
                 self.active = c
                 try:
-                    stop, out = await asyncio.wait_for(c.prompt(message), step_timeout)
+                    stop, out = await asyncio.wait_for(self._prompt_past_refusals(c, agent, message), step_timeout)
                 except asyncio.TimeoutError:
                     c.cancel()
                     await self._stop_child(name)  # make sure it has really stopped before moving on
@@ -1002,6 +1007,24 @@ class Engine:
                 f(agent, state, by)
             except Exception:
                 pass
+
+    async def _prompt_past_refusals(self, c, agent, message):
+        """Prompt a worker. Codex's only way to say no to an action ("No, and tell Codex what to do differently")
+        ends its turn as 'cancelled'. When that happens because Claudex said no, not because you pressed stop,
+        tell it why and let it carry on another way, instead of stopping the whole job."""
+        said = []
+        for _ in range(1 + REFUSAL_RETRIES):
+            seen = len(self.refusals)
+            stop, out = await c.prompt(message)
+            said.append(out)
+            new = [r for r in self.refusals[seen:] if r["agent"] == agent]
+            if stop != "cancelled" or self.cancelled or not new:
+                break
+            await self.ui.say("\n_(It was told no, so it's carrying on another way.)_\n\n")
+            message = ("Claudex said no to " + "; ".join(f"`{r['what']}` ({r['why']})" for r in new) + ". "
+                       "That isn't a stop: carry on with your step another way that doesn't need it. If the step "
+                       f"truly can't be done without it, say so and start a line with '{DECISION_TAG}'.")
+        return stop, "\n\n".join(x for x in said if x)
 
     async def _review(self, s, text, out, diff, files, truncated, rules, tier="full"):
         who = other(s["agent"])

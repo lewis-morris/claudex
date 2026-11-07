@@ -53,8 +53,8 @@ def _first_json(text):
 def claude_cmd(model, effort, schema, tools="", budget=3.0):
     return ["claude", "-p", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--setting-sources", "project", "--settings", '{"disableAllHooks": true}',
-            "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "plan",
-            "--tools", tools, "--model", model, "--effort", effort, "--max-budget-usd", str(budget),
+            "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "dontAsk",
+            "--tools", tools, *(["--allowedTools", tools] if tools else []), "--model", model, "--effort", effort, "--max-budget-usd", str(budget),
             "--output-format", "json", "--json-schema", json.dumps(schema)]
 
 
