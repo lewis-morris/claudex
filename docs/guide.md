@@ -1,0 +1,259 @@
+# Claudex: the how-to guide
+
+A walk-through from install to your first job, then every command with what it looks like. Pictures are real
+output (from a small demo project called `shop`; your folders will differ).
+
+- [1. Install and sign in](#1-install-and-sign-in)
+- [2. Set a project up](#2-set-a-project-up)
+- [3. Run a job](#3-run-a-job)
+- [4. Who does what: `models.md`](#4-who-does-what-modelsmd)
+- [5. Permissions](#5-permissions)
+- [6. What the agents share](#6-what-the-agents-share)
+- [7. Memory](#7-memory)
+- [8. Usage](#8-usage)
+- [9. Is it worth it? The benchmark](#9-is-it-worth-it-the-benchmark)
+- [10. Agents of Empires](#10-agents-of-empires)
+- [Everyday recipes](#everyday-recipes)
+- [Troubleshooting](#troubleshooting)
+
+---
+
+## 1. Install and sign in
+
+You need Claude Code and Codex (and their ACP connectors), then Claudex:
+
+```bash
+npm install -g @anthropic-ai/claude-code @openai/codex \
+               @agentclientprotocol/claude-agent-acp @agentclientprotocol/codex-acp
+uv tool install git+https://github.com/lewis-morris/claudex
+```
+
+**Sign in** to both. `claudex login` only opens the sign-in for whichever one needs it:
+
+<img src="images/cli-login.png" alt="claudex login: both already signed in" width="560">
+
+**Check everything** with `claudex doctor`: logins, versions, the two connectors, and every model the rules
+mention. Anything wrong gets a red cross and the command that fixes it. `claudex doctor --live` also sends a
+tiny message to each model to prove it answers.
+
+<img src="images/cli-doctor.png" alt="claudex doctor: logins, rules, worker connectors and models all ticked" width="760">
+
+Keep it current with `claudex update` (updates Claude, Codex and both connectors, then runs `doctor`).
+
+## 2. Set a project up
+
+In a git project, run `claudex init`. It:
+
+- makes **one house-rules file** both agents follow: `AGENTS.md`, with `CLAUDE.md` pointing at it (Claude
+  supports that), merging whatever you already had (your old file is kept as a `.bak`);
+- creates the **memory folder** `.claudex/` and keeps it out of git;
+- adds an empty **project rules** file for this project's own permissions or routing;
+- asks a quick model for a first **project map** (skip with `--no-map`).
+
+It shows the changes first, and never commits them.
+
+<img src="images/cli-init.png" alt="claudex init: AGENTS.md created from CLAUDE.md, CLAUDE.md now points at it, memory folder and project rules made" width="900">
+
+You don't *have* to run `init`: Claudex sets up its memory on the first job anyway. `init` is for when you
+want one house-rules file that also works when you use Claude or Codex on their own.
+
+## 3. Run a job
+
+```bash
+claudex                     # the full screen, with the monkeys
+claudex -p "add VAT to the quote total, with tests, then show it on the quote page"   # one job, then exit
+claudex --dry-run -p "…"    # just show the plan: who'd do what, nothing changes
+```
+
+<img src="images/screen-working.png" alt="The full screen mid-job" width="100%">
+
+What happens, in order:
+
+1. **The lead plans** (Claude Opus, high). It reads the project, splits the job into the fewest parts and
+   picks who does each part, on which model and reasoning level.
+2. **Big decisions get a second opinion** from the other side before anything is touched.
+3. **One worker at a time** does each part, in a real Claude Code or Codex session.
+4. **The other agent checks each change.** Problems go back to the same worker, then a stronger model,
+   then it stops and tells you.
+5. **The lead checks it all fits**, and the project map and journal are updated.
+
+In the full screen:
+
+| Key | Does |
+|---|---|
+| `/` | menu of every command and skill: keep typing to narrow it, Tab or arrows to pick |
+| `@claude …` / `@codex …` | send just that message to one agent |
+| **F2** | monkeys: playful / calm / off × big / small / tiny (or `/anim calm small`) |
+| **F3** | layout: monkeys on top / at the side / just the chat |
+| **F4** | colours: Jungle, Sunset, Daylight |
+| **Ctrl-C** | stop the current job (the chat stays open) |
+| **PgUp / PgDn** | scroll |
+| **Ctrl-D** / `/quit` | leave |
+
+<img src="images/looks.png" alt="Nine looks: playful, calm and off, each big, small or tiny" width="100%">
+
+Skills you've installed for Claude (`~/.claude/skills`) or Codex (`~/.codex/skills`) are in the `/` menu too:
+`/deployify ship the portal` runs that skill on the agent that has it.
+
+## 4. Who does what: `models.md`
+
+`claudex models` shows who does what right now, and where that comes from:
+
+<img src="images/cli-models.png" alt="claudex models: the lead, default, checkers, gatekeeper and the who-does-what table" width="900">
+
+To change it, run `claudex models --edit`. It makes `.claudex/models.md` in this project from what's in
+force now, and opens it. Add `--global` to change it for every project (`~/.config/claudex/models.md`).
+It's plain Markdown:
+
+```markdown
+# Who does what
+
+| When | Agent | Model | Reasoning | Browser |
+|---|---|---|---|---|
+| anything with money, VAT or invoices | codex | gpt-6-astra | high | |
+| the shop's pages and emails | claude | sonnet | high | yes |
+| everything else in Python | codex | gpt-6.1-sol | medium | |
+
+Lead: claude opus high
+Default: codex gpt-6.1-sol medium
+Claude reviewer: opus high
+Codex reviewer: gpt-6-astra high
+Gatekeeper: claude sonnet low
+
+## Notes for the lead
+
+- Database migrations always get a second opinion, even small ones.
+- Never touch the payments module without asking me.
+```
+
+- The **table** replaces the who-does-what rules.
+- The **settings** lines change the lead, the default worker, the two checkers and the gatekeeper.
+- **Anything else you write** goes to the lead as your guidance, word for word. That's the place for
+  "always do X" or "never let Y near Z".
+- `<!-- comments -->` are for people and are ignored.
+
+The project's `models.md` beats your global one. For a single session, `claudex --models other.md` uses that
+file instead. In the chat, `/models` shows what's in force.
+
+## 5. Permissions
+
+Workers ask before they act. Who answers depends on the mode (`--mode`, or `/mode` in the chat):
+
+| Mode | Who answers |
+|---|---|
+| `ask` | you, every time |
+| `auto` (default) | Claudex's rules: **deny** first, then **ask** (you), then **allow**. Anything the rules don't cover goes to the **gatekeeper** (a quick model), which allows, refuses, or hands it to you. If nobody's watching (a script, the benchmark), anything that would ask you is refused |
+| `unrestricted` | nobody: the agents never ask. A red **UNRESTRICTED** tag stays on screen |
+
+`claudex permissions` shows the rules and every recent decision, with who made it:
+
+<img src="images/cli-permissions.png" alt="claudex permissions: modes, rules, and the last 8 decisions" width="900">
+
+The defaults let workers read, edit inside the project, and run tests, builds, linters and git inspection.
+They ask you before pushes, deploys, installs, `ssh` and deleting folders, and refuse `sudo`, your keys and
+secrets, force-pushes and edits outside the project. A chained command (`ls && …`) or a risky flag
+(`find -delete`) never gets through on an allow rule. Workers can never change Claudex's own rules or memory.
+
+Change them for one project with `claudex permissions --edit`, or everywhere with `claudex rules --edit`. A
+project can only add rules; it can't remove yours.
+
+## 6. What the agents share
+
+`claudex shared` shows what Claude and Codex share (house rules, skills, connectors) and what only one has:
+
+<img src="images/cli-shared.png" alt="claudex shared: house rules shared, skills and connectors split by agent" width="900">
+
+`claudex shared --link-skills` makes every skill available to both, by linking (nothing is copied or deleted).
+
+## 7. Memory
+
+`claudex memory` lists everything Claudex remembers about the project, and shows the map, recent decisions
+and recent jobs. `--files` lists every file.
+
+<img src="images/cli-memory.png" alt="claudex memory: the files in .claudex" width="760">
+
+| File | What |
+|---|---|
+| `project/map.md` | how the project is laid out |
+| `project/decisions.md` | big decisions, second opinions, the lead's answers |
+| `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
+| `sessions/<id>/notes.md` | one session's requests, handovers and reviews |
+| `permissions.jsonl` | every permission decision |
+| `models.md`, `rules.toml` | this project's own who-does-what and rules |
+
+Everyone (the lead, the second opinion, both workers, both checkers, the final check) gets the same memory.
+
+## 8. Usage
+
+`claudex usage` charts tokens across both agents, by day, project, model and Claudex role:
+
+<img src="images/cli-usage.png" alt="claudex usage: a coloured bar chart per day, totals, top projects and Claudex roles (example data)" width="760">
+
+`claudex usage --web` opens the same as a live web page (add `--lan` to see it from your phone);
+`--json` gives raw numbers; `--project .` limits it to one folder. In the chat: `/usage` and `/usage web`.
+
+<img src="images/usage-web.png" alt="The usage web page (example data)" width="760">
+
+Neither Claude nor Codex reports how much of your plan's allowance is left, so this shows tokens.
+
+## 9. Is it worth it? The benchmark
+
+```bash
+claudex bench                       # both tasks, all three contenders, one run each
+claudex bench --runs 3              # fairer: models vary from run to run
+claudex bench --tasks quote-vat --arms codex,claudex
+claudex bench --list
+```
+
+Claude alone, Codex alone and Claudex each get the same brief and a fresh copy of a small project, and work
+unattended. Then:
+
+- **hidden tests** they never saw decide the main score;
+- **two blind reviewers** (Claude Opus and Codex Astra) mark an anonymous copy out of 10;
+- **time** and **tokens** show what it cost.
+
+The report (`report.md`, `report.html`, `results.json`) goes to `~/.local/share/claudex/bench/`. Add your own
+task: a folder in `claudex/bench_tasks/` with a `task.toml` (the brief and how many hidden tests), a
+`starter/` project and `hidden/` tests.
+
+## 10. Agents of Empires
+
+Add Claudex as an agent in `~/.config/agent-of-empires/config.toml`:
+
+```toml
+[session.custom_agents]
+claudex = "claudex"
+
+[session.agent_acp_cmd]
+claudex = "claudex --acp"
+```
+
+Pick **claudex** for a session: Routing, Effort, Mode and Checks are pickers, and the `/` menu has the same
+commands (`/models`, `/permissions`, `/usage`, `/memory`, `/shared`, `/init`…) and your skills.
+
+---
+
+## Everyday recipes
+
+| I want to… | Do |
+|---|---|
+| see the plan before anything changes | `claudex --dry-run -p "…"` or `/dry` in the chat |
+| send one thing to one agent | start the message with `@claude` or `@codex` |
+| make Codex do all the database work in this project | `claudex models --edit`, add a row or a note |
+| stop being asked about `npm run dev` here | `claudex permissions --edit`, add `allow = ["run:npm run dev*"]` |
+| let it run without asking anything | `claudex --mode unrestricted` (on a branch you can throw away) |
+| run it from a script or cron | `claudex -p "…" --unattended`: anything that would ask you is refused |
+| skip the extra checks for a quick job | `--checks reviews` (no second opinion) or `--checks off` |
+| calm the monkeys down | F2, or `/anim calm small`, or `/anim off` |
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| "isn't signed in" / a check couldn't run | `claudex login`, then `claudex doctor` |
+| "claude-agent-acp not found" | `npm i -g @agentclientprotocol/claude-agent-acp` (same for `codex-acp`) |
+| "This folder isn't a git project" | `git init` (Claudex compares files to check every change), or `--checks off` |
+| a model name stopped working | `claudex doctor` shows which; fix it with `claudex models --edit` |
+| one agent hit its usage limit | nothing to do: the other one takes over, and Claudex says when the limit resets |
+| the chat says another job is running here | only one Claudex job works in a project at a time; it waits its turn |
+| the monkeys look odd | your terminal needs 24-bit colour (most do); try F4, or `/anim off` |

@@ -270,9 +270,17 @@ def show_permissions(cwd=".", n=30, edit=False):
     print(f"\n  Workers ask before acting; Claudex answers: {R}deny{RESET} rules, then {Y}ask{RESET} rules (you), then "
           f"{G}allow{RESET} rules,\n  then the gatekeeper ({p.get('gatekeeper', {}).get('model', 'none')}). Chained commands "
           "never match an allow rule. With nobody watching, 'ask you' becomes 'no'.\n")
+    width = max(60, __import__("shutil").get_terminal_size((100, 20)).columns - 4)
     for k, colour in (("deny", R), ("ask", Y), ("allow", G)):
         items = p.get(k, [])
-        print(f"  {colour}{k}{RESET} ({len(items)}): " + ", ".join(items[:14]) + (" …" if len(items) > 14 else ""))
+        line, shown = "", 0
+        for it in items:                 # as many as fit on one line
+            if len(line) + len(it) + 14 > width:
+                break
+            line += (", " if line else "") + it
+            shown += 1
+        more = f" … +{len(items) - shown} more" if shown < len(items) else ""
+        print(f"  {colour}{k}{RESET} ({len(items)}): {line}{more}")
     recent = perms.recent(root / ".claudex" / "permissions.jsonl", n)
     print(f"\n{B}Last {len(recent)} decisions{RESET}" + ("" if recent else ": none yet"))
     for r in recent:

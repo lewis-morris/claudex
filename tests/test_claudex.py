@@ -1197,7 +1197,8 @@ def test_lead_reads_the_notes(job):
 @pytest.mark.parametrize("cmd,want", [
     ("ls & rm /tmp/x", None), ("find /tmp -delete", "ask"), ("git branch -D main", "ask"),
     ("cat ~/.ssh/id_ed25519", "deny"), ("sed -i s/a/b/ x.py", None), ("pytest -q", "allow"),
-    ("echo hi > .claudex/rules.toml", "deny")])
+    ("echo hi > .claudex/rules.toml", "deny"), ("python3 -m pytest -q", "allow"), ("grep -i total calc.py", "allow"),
+    ("tail -f log.txt", "allow")])
 def test_permission_bypasses_are_closed(cmd, want, tmp_path):
     r = engine.load_rules()
     k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": cmd}}, str(tmp_path))

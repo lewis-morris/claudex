@@ -374,7 +374,7 @@ class Engine:
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
         kind, command, paths, title = permissions.describe(tc, self.project_root)
-        what = " ".join((command or ", ".join(paths) or title or kind).split())   # one line, for messages and the log
+        what = permissions.short(" ".join((command or ", ".join(paths) or title or kind).split()), self.project_root)
         log = self.root / "permissions.jsonl"
 
         def answer(decision, by, why):

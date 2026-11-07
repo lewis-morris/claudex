@@ -12,6 +12,8 @@ check each other's work, and share one memory. In your terminal, or inside Agent
 ![python](https://img.shields.io/badge/python-3.11%20%E2%80%93%203.14-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
+**[📖 The how-to guide](docs/guide.md)**: install, your first job, and every command with screenshots.
+
 </div>
 
 ---
@@ -169,7 +171,8 @@ claudex -p "message"         run one message, then exit (exit code 1 if it faile
 claudex --acp                run as an ACP agent (Agents of Empires, Zed, …)
 claudex login [claude|codex] sign in to whichever isn't signed in (--device for a code, --again to redo)
 claudex doctor [--live]      logins, versions, connectors, every model in the rules (--live: ping each model)
-claudex rules [--edit]       who does what (--edit makes your own copy and opens it)
+claudex models [--edit] [--global]   who does what, and where it comes from (models.md)
+claudex rules [--edit]       the full rules file (--edit makes your own copy and opens it)
 claudex log [-n N]           recent steps in this project
 claudex update               update Claude, Codex and both connectors, then run doctor
 claudex init                 one house-rules file for both agents, memory, project rules, first map
@@ -186,11 +189,12 @@ claudex demo                 a pretend job, to preview the look
   --effort auto|low|medium|high|xhigh force one reasoning level for every step
   --checks full|reviews|off           second opinions + reviews / reviews only / none
   --lead-model M  --lead-effort E     change the lead for this run
+  --models FILE                       use this models.md for this session
   --rules FILE   --dry-run   --cwd DIR   --plain
 ```
 
 In the chat: `/auto /claude /codex`, `/effort …`, `/mode …`, `/checks …`, `/anim …`, `/dry`, `/status`,
-`/init`, `/shared`, `/memory`, `/permissions`, `/usage` (`/usage web`), `/rules`, `/doctor`, `/log`, `/help`, `/quit`.
+`/init`, `/models`, `/shared`, `/memory`, `/permissions`, `/usage` (`/usage web`), `/rules`, `/doctor`, `/log`, `/help`, `/quit`.
 
 </details>
 
@@ -213,8 +217,13 @@ flowchart LR
 
 ## Who does what
 
-The defaults (in [`claudex/rules.toml`](claudex/rules.toml), re-read on every message; `claudex rules --edit`
-to change them):
+`claudex models` shows who does what and where it comes from. To change it, `claudex models --edit` writes a
+plain **`models.md`** you can edit: a who-does-what table, the lead / default / checker / gatekeeper models, and
+any notes you want the lead to follow ("money work always goes to Codex Astra"). Per project
+(`.claudex/models.md`) or for every project (`--global`); `claudex --models FILE` for one session.
+[More in the guide.](docs/guide.md#4-who-does-what-modelsmd)
+
+The defaults (from [`claudex/rules.toml`](claudex/rules.toml)):
 
 | Job | Agent | Model | Reasoning |
 |---|---|---|---|

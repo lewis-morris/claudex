@@ -24,8 +24,10 @@ import shlex
 # allow rule can't vouch for it: "ls & rm x" must not ride in on "run:ls*".
 COMPOUND = (";", "&", "|", "`", "$(", "${", ">", "<", "\n", "\r")
 # Flags and sub-commands that turn an innocent-looking prefix destructive or able to run other programs.
-RISKY_WORDS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "--force", "-f", "-rf", "-fr", "-d", "-D", "--delete",
-               "-m", "-M", "--hard", "--exec", "-i", "--in-place", "eval", "xargs")
+# (Only flags that are dangerous on the commands the default allow list covers; everyday ones like
+# `python -m`, `grep -i` and `tail -f` are fine.)
+RISKY_WORDS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "--force", "--delete", "--hard", "--exec",
+               "--in-place", "eval", "xargs", "-rf", "-fr")
 # Claudex's own rules and memory can never be changed by a worker in ask/auto mode, whatever the rules say.
 PROTECTED_DIRS = (".claudex",)
 KIND_ALIASES = {"execute": "run", "bash": "run", "shell": "run", "write": "edit", "fetch": "fetch"}
@@ -190,3 +192,10 @@ def summary_lines(rules):
 class Clock:
     """Tiny helper so tests can fake time."""
     now = staticmethod(time.time)
+
+
+def short(text, project_root):
+    """Paths as you'd say them: relative inside the project, ~ for your home folder."""
+    root = str(pathlib.Path(project_root).resolve()).rstrip("/") + "/"
+    home = str(pathlib.Path.home()).rstrip("/") + "/"
+    return text.replace(root, "").replace(home, "~/")
