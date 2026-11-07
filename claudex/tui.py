@@ -237,22 +237,100 @@ class StageControl(UIControl):
         return False
 
 
-def _md(text, base):
-    """**bold** and _quiet_ lines into prompt_toolkit fragments."""
+_INLINE = re.compile(r"(`[^`\n]+`)|(\*\*[^*\n]+?\*\*)|(\[[^\]\n]+\]\([^)\s]+\))|((?:(?<=\s)|^)_[^_\n]+?_(?=\s|$|[.,:;!?]))")
+
+
+def _inline(line, base):
+    """`code`, **bold**, [links](url) and _quiet_ text inside one line."""
+    out, pos = [], 0
+    for m in _INLINE.finditer(line):
+        if m.start() > pos:
+            out.append((base, line[pos:m.start()]))
+        tok = m.group(0)
+        if m.group(1):
+            out.append((base + " class:code", tok[1:-1]))
+        elif m.group(2):
+            out.append((base + " bold", tok[2:-2]))
+        elif m.group(3):
+            label, url = tok[1:].split("](", 1)
+            out.append((base + " underline", label))
+            if url.rstrip(")") != label:
+                out.append((base + " class:dim", f" ({url.rstrip(')')})"))
+        else:
+            out.append((base + " class:dim italic", tok[1:-1]))
+        pos = m.end()
+    if pos < len(line):
+        out.append((base, line[pos:]))
+    return out
+
+
+def _cells(row):
+    return [c.strip() for c in re.split(r"(?<!\\)\|", row.strip().strip("|"))]
+
+
+def _table(rows, base, width):
+    """A markdown table as lined-up columns, wrapped to fit."""
+    import textwrap
+    header, body = rows[0], rows[1:]
+    n = max(len(r) for r in rows)
+    rows = [r + [""] * (n - len(r)) for r in [header] + body]
+    plain = [[re.sub(r"[`*]", "", c) for c in r] for r in rows]
+    natural = [max(len(r[i]) for r in plain) for i in range(n)]
+    room = max(20, width - 3 * (n - 1) - 2)
+    widths = natural[:]
+    while sum(widths) > room:                       # shrink the widest column until it fits
+        i = widths.index(max(widths))
+        if widths[i] <= 8:
+            break
+        widths[i] -= 1
     out = []
-    for line in text.split("\n"):
-        # _quiet notes_ (anywhere a word starts) and **bold**
-        for j, chunk in enumerate(re.split(r"(?:(?<=\s)|^)_(.+?)_(?=\s|$|[.,:;!?])", line)):
-            if not chunk:
-                continue
-            if j % 2:
-                out.append((base + " class:dim italic", chunk))
-                continue
-            for i, part in enumerate(re.split(r"\*\*(.+?)\*\*", chunk)):
-                if part:
-                    out.append((base + (" bold" if i % 2 else ""), part))
-        out.append(("", "\n"))
-    if out:
+    for r_i, r in enumerate(plain):
+        wrapped = [textwrap.wrap(c, widths[i]) or [""] for i, c in enumerate(r)]
+        for k in range(max(len(w) for w in wrapped)):
+            for i, w in enumerate(wrapped):
+                cell = (w[k] if k < len(w) else "").ljust(widths[i])
+                out.append((base + (" bold" if r_i == 0 else ""), cell))
+                if i < n - 1:
+                    out.append(("class:dim", " │ "))
+            out.append(("", "\n"))
+        if r_i == 0:
+            out.append(("class:dim", "─┼─".join("─" * w for w in widths) + "\n"))
+    return out
+
+
+def _md(text, base, width=100):
+    """Markdown into prompt_toolkit fragments: tables, headings, lists, code blocks, `code`, **bold**, links."""
+    out, lines, i, fenced = [], text.split("\n"), 0, False
+    while i < len(lines):
+        line = lines[i]
+        if line.strip().startswith("```"):
+            fenced = not fenced
+            i += 1
+            continue
+        if fenced:
+            out += [(base + " class:code", "  " + line), ("", "\n")]
+            i += 1
+            continue
+        if (line.strip().startswith("|") and i + 1 < len(lines)
+                and re.fullmatch(r"\s*\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?\s*", lines[i + 1] or "")):
+            rows, i = [_cells(line)], i + 2
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                rows.append(_cells(lines[i]))
+                i += 1
+            out += _table(rows, base, width)
+            continue
+        m = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if m:
+            out += [(base + " bold class:heading", m.group(2).strip()), ("", "\n")]
+            i += 1
+            continue
+        b = re.match(r"^(\s*)[-*]\s+(.*)$", line)
+        if b:
+            out.append((base, b.group(1) + "• "))
+            line = b.group(2)
+        out += _inline(line, base) + [("", "\n")]
+        i += 1
+    if out and out[-1] == ("", "\n"):
         out.pop()
     return out
 
@@ -401,18 +479,43 @@ class TUI:
         if not self.questions:
             return
         _, opts, title = self.questions[0]
-        lines = [f"**Permission needed:** {title}"] + [f"  {n}. {o.get('name')}" for n, o in enumerate(opts, 1)]
-        lines.append("_Type a number and press Enter._")
-        self._add("sys", "\n" + "\n".join(lines) + "\n")
+        keys = self._keys(opts)
+        lines = [f"{title}", ""] + [f"  [{keys.get(o.get('optionId'), str(n)).upper()}] {o.get('name')}"
+                                    for n, o in enumerate(opts, 1)]
+        lines.append("_Press the letter (or type its number and Enter)._")
+        self._add("ask", "\n".join(lines))
+        self.blocks.append({"who": "sys", "text": ""})
+
+    @staticmethod
+    def _keys(opts):
+        """optionId -> the letter that picks it: Y allow once, A allow always, N no (numbers otherwise)."""
+        letters, used = {}, set()
+        for n, o in enumerate(opts, 1):
+            kind = o.get("kind", "")
+            want = {"allow_once": "y", "allow_always": "a", "reject_once": "n", "reject_always": "r"}.get(kind, str(n))
+            if want in used:
+                want = str(n)
+            used.add(want)
+            letters[o.get("optionId")] = want
+        return letters
 
     def _answer(self, line):
-        fut, opts, _ = self.questions[0]
-        if not (line.isdigit() and 1 <= int(line) <= len(opts)):
-            self._add("sys", f"\n_Type a number from 1 to {len(opts)}._\n")
+        fut, opts, title = self.questions[0]
+        word = line.strip().lower()
+        keys = self._keys(opts)
+        pick = None
+        if word.isdigit() and 1 <= int(word) <= len(opts):
+            pick = opts[int(word) - 1]
+        else:
+            alias = {"yes": "y", "ok": "y", "no": "n", "always": "a"}.get(word, word)
+            pick = next((o for o in opts if keys.get(o.get("optionId")) == alias), None)
+        if pick is None:
+            self._add("sys", "\n_Press " + ", ".join(k.upper() for k in keys.values()) + "._\n")
             return
         self.questions.pop(0)
         if not fut.done():
-            fut.set_result({"outcome": {"outcome": "selected", "optionId": opts[int(line) - 1]["optionId"]}})
+            fut.set_result({"outcome": {"outcome": "selected", "optionId": pick["optionId"]}})
+        self._add("sys", f"\n_You chose “{pick.get('name')}” for: {title[:100]}_\n")
         self._show_question()
 
     def drop_questions(self):
@@ -704,6 +807,12 @@ class TUI:
         self._cache = (self.version, frags)
         return frags
 
+    def _chat_width(self):
+        try:
+            return max(40, self.chat.render_info.window_width - 2)
+        except Exception:
+            return 100
+
     def _transcript(self):
         frags = []
         for b in self.blocks:
@@ -713,9 +822,12 @@ class TUI:
                 continue
             if who == "stop":
                 frags.append(("class:stop bold", "■ Stopped\n"))
+            elif who == "ask":
+                frags.append(("class:ask bold", "⚠ Your answer needed\n"))
             elif who != "sys":
                 frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}\n"))
-            frags.extend(_md(b["text"].strip("\n"), {"sys": "class:sys", "stop": "class:stop"}.get(who, "class:body")))
+            frags.extend(_md(b["text"].strip("\n"), {"sys": "class:sys", "stop": "class:stop", "ask": "class:ask"}.get(who, "class:body"),
+                             self._chat_width()))
             frags.append(("", "\n\n"))
         if not frags:
             frags = [("class:dim", "  Ask for anything. Type / for commands and skills.\n")]
@@ -749,7 +861,9 @@ class TUI:
     def status(self):
         e = self.eng
         if self.questions:
-            left = " Answer the permission question: type its number "
+            _, opts, title = self.questions[0]
+            keys = "/".join(k.upper() for k in self._keys(opts).values())
+            left = f" ⚠ {self.NAMES.get(self.speaker, 'An agent')} wants to: {title[:60]}  press {keys} "
         elif self.busy and not self.busy.done():
             lv = self.live
             secs = int(time.time() - lv["since"])
@@ -811,6 +925,13 @@ class TUI:
             else:
                 self.input.text = ""
 
+        waiting = Condition(lambda: bool(self.questions) and not self.input.text)
+        for key in ("y", "n", "a", "r", "Y", "N", "A", "R"):
+            @kb.add(key, filter=waiting)
+            def _(event, key=key):            # one key answers the question, no Enter needed
+                self._answer(key.lower())
+                self._refresh()
+
         @kb.add("c-d")
         def _(event):
             event.app.exit()
@@ -853,7 +974,8 @@ class TUI:
             "frame.border": p["edge"], "input": f"bg:{p['panel']} {p['text']}",
             "dim": p["dim"], "accent": p["accent"], "good": p["good"], "body": p["text"], "sys": p["dim"],
             "who.you": f"{p['text']}", "who.lead": p["accent"], "who.claude": p["claude"],
-            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold", "stop": f"{p['bad']}",
+            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold", "stop": f"{p['bad']}", "ask": f"{p['accent']}",
+            "code": f"{p['codex']}", "heading": f"{p['accent']}",
             "completion-menu": f"bg:{p['panel']} {p['text']}",
             "completion-menu.completion.current": f"bg:{p['accent']} {p['bg']}",
             "completion-menu.meta.completion": f"bg:{p['panel']} {p['dim']}",
@@ -1009,9 +1131,19 @@ class TUI:
             self._refresh()
 
 
+def _tidy_command(text, cwd):
+    """'cd <the project> && npm test' is just 'npm test'; project paths are shown relative."""
+    text = " ".join(str(text).split())
+    root = str(cwd).rstrip("/")
+    for prefix in (f"cd {root} && ", f'cd "{root}" && ', f"cd {root}; ", f"cd '{root}' && "):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    return text.replace(root + "/", "")
+
+
 def describe_tool(upd, cwd):
     """'Read · support.js', 'Terminal · npm test', 'Search · "font"': what a tool call is actually doing."""
-    title = str(upd.get("title") or upd.get("kind") or "tool").strip()
+    title = _tidy_command(str(upd.get("title") or upd.get("kind") or "tool").strip(), cwd)
     raw = upd.get("rawInput") if isinstance(upd.get("rawInput"), dict) else {}
     detail = ""
     for key in ("command", "cmd", "file_path", "path", "notebook_path", "pattern", "query", "url", "description"):
@@ -1021,12 +1153,7 @@ def describe_tool(upd, cwd):
             break
     if not detail and upd.get("locations"):
         detail = str((upd["locations"][0] or {}).get("path") or "")
-    detail = " ".join(detail.split())
-    root = str(cwd).rstrip("/")
-    for prefix in (f"cd {root} && ", f'cd "{root}" && ', f"cd {root}; "):
-        if detail.startswith(prefix):        # "cd <the project> && npm test" is just "npm test"
-            detail = detail[len(prefix):]
-    detail = detail.replace(root + "/", "")
+    detail = _tidy_command(detail, cwd)
     if detail and detail.lower() not in title.lower():
         return f"{title} · {detail}"
     return title

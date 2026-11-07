@@ -87,6 +87,7 @@ In the full screen:
 | **F2** | monkeys: playful / calm / off × big / small / tiny (or `/anim calm small`) |
 | **F3** | layout: monkeys on top / at the side / just the chat |
 | **F4** | colours: Jungle, Sunset, Daylight |
+| **Y / A / N** | answer a permission question: yes / yes and don't ask again / no (a yellow "Your answer needed" box shows it) |
 | **Ctrl-C** | stop the current job (the chat stays open) |
 | **PgUp / PgDn** | scroll |
 | **Ctrl-D** / `/quit` | leave |

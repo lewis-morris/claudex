@@ -1516,3 +1516,33 @@ def test_live_status_says_what_is_happening(tmp_path):
         return "".join(x for _, x in t.status())
     line = asyncio.run(go())
     assert "Claude is working" in line and "1 action" in line and "support.js" in line and "no input needed" in line
+
+
+def test_markdown_tables_headings_and_code():
+    from claudex.tui import _md
+    text = "## Phases\n| Phase | What it delivers | Effort |\n|---|---|---|\n| 0 | Proof of concept | About 1 week |\n" \
+           "| 1 | Paper sheets to a Word font | 4-6 weeks |\nUse `claudex init` and **bold**."
+    out = "".join(t for _, t in _md(text, "b", 80))
+    lines = out.split("\n")
+    assert lines[0] == "Phases" and "|---" not in out and "`" not in out and "**" not in out
+    header = next(l for l in lines if "Phase" in l and "Effort" in l)
+    row = next(l for l in lines if "Proof of concept" in l)
+    assert header.index("│") == row.index("│")                     # columns line up
+
+
+def test_permission_answers_by_letter(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+    opts = [{"optionId": "a1", "name": "Yes", "kind": "allow_once"},
+            {"optionId": "a2", "name": "Yes, and don't ask again", "kind": "allow_always"},
+            {"optionId": "r1", "name": "No", "kind": "reject_once"}]
+
+    async def go(answer):
+        t.busy = asyncio.ensure_future(asyncio.sleep(30))
+        q = asyncio.ensure_future(t.permission({"toolCall": {"title": "Fetch x"}, "options": opts}))
+        await asyncio.sleep(0)
+        assert "press Y/A/N" in "".join(x for _, x in t.status())
+        t._answer(answer)
+        return (await q)["outcome"]["optionId"]
+    assert asyncio.run(go("y")) == "a1" and asyncio.run(go("no")) == "r1" and asyncio.run(go("A")) == "a2"
+    assert asyncio.run(go("3")) == "r1"

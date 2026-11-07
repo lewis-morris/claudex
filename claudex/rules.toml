@@ -113,6 +113,7 @@ use = { agent = "claude", model = "sonnet", effort = "low" }
 # gatekeeper. Patterns are "kind:glob": kinds are read, edit, delete, move, search, run, fetch, think, other.
 # "@project" = only paths inside the project, "@outside" = any path outside it, "~" = your home folder.
 # A chained command (;, &&, |, $(…), redirects) never matches an allow rule: the gatekeeper looks at it.
+# Reading web pages (fetch) isn't in any list, so the gatekeeper decides: usually yes for public pages.
 # `claudex permissions` shows these and every recent decision. A project can add its own in .claudex/rules.toml.
 [permissions]
 gatekeeper = { agent = "claude", model = "sonnet", effort = "low" }
@@ -131,7 +132,7 @@ ask = [
     "run:ssh *", "run:scp *", "run:rsync *", "run:rm -r*", "run:rm -f*", "run:docker *", "run:kubectl *",
     "run:git branch -d*", "run:git branch -D*", "run:find *",
     "run:psql *", "run:mysql *", "run:redis-cli *", "run:stripe *", "run:aws *", "run:gcloud *", "run:az *",
-    "run:shopify theme push*", "run:shopify app deploy*", "fetch:*",
+    "run:shopify theme push*", "run:shopify app deploy*",
 ]
 allow = [
     "read:*", "search:*", "think:*", "edit:@project", "delete:@project", "move:@project",
