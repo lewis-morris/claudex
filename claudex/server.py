@@ -13,6 +13,7 @@ from .paths import self_command
 from .commands import acp_commands, expand_skill, load_skills
 from .engine import CHECKS, EFFORTS, LEGACY_MODES, MODES, ROUTES, Engine, norm_mode
 from .rpc import Peer, RpcError
+from .keepalive import PromptActivity
 
 
 def config_options(e):
@@ -71,9 +72,11 @@ def load_session_meta(sid):
 class SessionUI:
     def __init__(self, peer, session_id):
         self.peer, self.session_id = peer, session_id
+        self.activity = PromptActivity(self.update)
 
     async def update(self, upd):
         self.peer.notify("session/update", {"sessionId": self.session_id, "update": upd})
+        self.activity.touch()
 
     async def say(self, text):
         await self.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
@@ -177,6 +180,7 @@ class Server:
                 raise RpcError(-32000, "Claudex is still working on the last message")
             e.busy = True
             try:
+                await e.ui.activity.start()
                 if typed.startswith("/") and self.local_command(typed):
                     e.local = asyncio.ensure_future(self.slash(e, typed))
                     try:
@@ -192,6 +196,7 @@ class Server:
                 text = (typed + ("\n" + extra if extra else "")).strip()
                 return {"stopReason": await e.turn(text)}
             finally:
+                await e.ui.activity.stop()
                 e.busy = False
         raise RpcError(-32601, f"method not found: {method}")
 
@@ -249,6 +254,8 @@ class Server:
     async def on_notify(self, method, p):
         if method == "session/cancel":
             e = self.sessions.get(p.get("sessionId"))
+            if e:
+                await e.ui.activity.stop()
             if e and getattr(e, "local", None):
                 e.local.cancel()
             elif e:
@@ -271,4 +278,5 @@ async def serve(settings=None):
         await srv.peer.run()
     finally:
         for e in srv.sessions.values():
+            await e.ui.activity.stop()
             await e.close()
