@@ -85,7 +85,7 @@ In the full screen:
 | `/` | menu of commands: keep typing to narrow it, Tab or arrows to pick |
 | `$` | menu of your skills (`$deployify ship it`) |
 | `/resume` | pick an earlier conversation here with ↑ ↓ and Enter: its screen and plan come back, and Claude and Codex reload their own conversations, so they remember everything (`claudex --resume`, or `claudex -c` for the latest) |
-| **Tab** | complete the highlighted command or skill (`/resu` + Tab → `/resume`); a clear abbreviation like `/stat` works on its own |
+| **Tab** or **→** | complete the highlighted command or skill (`/resu` + Tab → `/resume`; use → where the terminal keeps Tab, like Dolphin's panel); a clear abbreviation like `/stat` works on its own |
 | `@claude …` / `@codex …` | send just that message to one agent |
 | **F2** | monkeys: playful / calm / off × big / small / tiny (or `/anim calm small`) |
 | **F3** | layout: monkeys on top / at the side / just the chat |

@@ -1001,6 +1001,12 @@ class TUI:
         def _(event):                      # Tab fills in the highlighted (or first) match
             self._complete_input()
 
+        # → at the end of the line does the same, for terminals that keep Tab for themselves (Dolphin's panel)
+        @kb.add("right", filter=typing_command & Condition(
+            lambda: self.input.buffer.cursor_position == len(self.input.text)), eager=True)
+        def _(event):
+            self._complete_input()
+
         @kb.add("c-c")
         def _(event):
             # Like Claude Code: Ctrl-C clears what you typed or stops the job; with nothing to clear or stop,
@@ -1154,7 +1160,7 @@ class TUI:
             if len(matches) == 1:
                 cmd = matches[0]
             elif matches:
-                self._add("sys", "\n_Did you mean " + " or ".join(f"/{m}" for m in matches) + "? Tab completes._\n")
+                self._add("sys", "\n_Did you mean " + " or ".join(f"/{m}" for m in matches) + "? Tab or → completes._\n")
                 return
         if cmd in ("quit", "exit"):
             self.app.exit()
