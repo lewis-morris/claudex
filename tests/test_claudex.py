@@ -1480,3 +1480,23 @@ def test_acp_session_can_be_reloaded(tmp_path, monkeypatch):
     res, e = asyncio.run(again())
     assert e.session_key == key and e.checks == "reviews"
     assert next(o for o in res["configOptions"] if o["id"] == "checks")["currentValue"] == "reviews"
+
+
+def test_session_load_is_careful(tmp_path, monkeypatch):
+    from claudex import server
+    monkeypatch.setattr(server, "SESSIONS_DIR", tmp_path / "sessions")
+    srv = _server_session(tmp_path)
+    for bad in ("../outside", "a/b", ""):
+        with pytest.raises(server.RpcError):
+            asyncio.run(srv.on_request("session/load", {"sessionId": bad, "cwd": str(tmp_path), "mcpServers": []}))
+    (tmp_path / "sessions").mkdir()
+    (tmp_path / "sessions/claudex-x.json").write_text(json.dumps({"cwd": str(tmp_path), "key": "../evil",
+        "settings": {"checks": "off", "dry_run": True, "unattended": True, "mode": "nonsense"}}))
+    meta = server.load_session_meta("claudex-x")
+    assert "key" not in meta and meta["settings"] == {"checks": "off"}
+    (tmp_path / "sessions/claudex-y.json").write_text("[]")
+    assert server.load_session_meta("claudex-y") == {}
+    other = tmp_path / "other"
+    other.mkdir()
+    with pytest.raises(server.RpcError):
+        asyncio.run(srv.on_request("session/load", {"sessionId": "claudex-x", "cwd": str(other), "mcpServers": []}))

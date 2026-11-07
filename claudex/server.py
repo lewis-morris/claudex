@@ -33,21 +33,39 @@ SESSIONS_DIR = pathlib.Path(os.environ.get("XDG_DATA_HOME", pathlib.Path.home() 
 
 def save_session_meta(sid, e):
     """What a restarted session needs to carry on: its folder, its memory key and its pickers."""
+    if not sid or not SAFE_ID.match(str(sid)):
+        return
     try:
         SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
         (SESSIONS_DIR / f"{sid}.json").write_text(json.dumps({
             "cwd": e.cwd, "key": e.session_key,
-            "settings": {"route": e.route, "effort": e.effort, "mode": e.mode, "checks": e.checks,
-                         "models": e.models_file, "rules": e.rules_path}}))
+            "settings": {"route": e.route, "effort": e.effort, "mode": e.mode, "checks": e.checks}}))
     except Exception:
         pass
 
 
+SAFE_ID = __import__("re").compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+PICKERS = {"route": ROUTES, "effort": EFFORTS, "mode": MODES, "checks": CHECKS}
+
+
 def load_session_meta(sid):
+    """Saved metadata for a session, checked: only known pickers with valid values come back."""
+    if not sid or not SAFE_ID.match(sid):
+        return {}
     try:
-        return json.loads((SESSIONS_DIR / f"{sid}.json").read_text()) if sid and "/" not in sid else {}
+        data = json.loads((SESSIONS_DIR / f"{sid}.json").read_text())
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
+    out = {}
+    if isinstance(data.get("cwd"), str):
+        out["cwd"] = data["cwd"]
+    if isinstance(data.get("key"), str) and SAFE_ID.match(data["key"]):
+        out["key"] = data["key"]
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    out["settings"] = {k: v for k, v in settings.items() if k in PICKERS and v in PICKERS[k]}
+    return out
 
 
 class SessionUI:
@@ -90,16 +108,19 @@ class Server:
             # itself). Claudex picks the same session back up: same memory and notes, same pickers.
             loading = method == "session/load"
             sid = p.get("sessionId") if loading else "claudex-" + uuid.uuid4().hex[:16]
-            if not sid:
-                raise RpcError(-32602, "session/load needs a sessionId")
+            if not isinstance(sid, str) or not SAFE_ID.match(sid):
+                raise RpcError(-32602, "session/load needs a plain session id")
             if loading and sid in self.sessions:
                 e = self.sessions[sid]
                 return {"configOptions": config_options(e)}
             saved = load_session_meta(sid) if loading else {}
             cwd = p.get("cwd") or saved.get("cwd") or "."
+            if saved.get("cwd") and os.path.realpath(cwd) != os.path.realpath(saved["cwd"]):
+                # same session, different folder: never resume one project's memory against another's files
+                raise RpcError(-32602, f"this session belongs to {saved['cwd']}, not {cwd}")
             key = saved.get("key") or (None if os.environ.get("AOE_ARTIFACT_DIR") else sid)
             e = Engine(cwd, SessionUI(self.peer, sid), p.get("mcpServers") or [],
-                       settings=dict(self.settings, **{k: v for k, v in saved.get("settings", {}).items() if v}),
+                       settings=dict(self.settings, **saved.get("settings", {})),   # pickers only; launch options stay
                        session_key=key)
             self.sessions[sid] = e
             save_session_meta(sid, e)
