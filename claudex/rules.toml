@@ -4,14 +4,14 @@
 
 [lead]
 # The planner that splits a job, picks who does each part, and does the final check
-# (Lewis's table: architect / technical lead = Claude Opus 5.5, high).
+# (architect / technical lead = Claude Opus 5.5, high).
 agent = "claude"
 model = "opus"
 effort = "high"
 
 [reviewers]
 # Each side checks the other's work and gives second opinions on the other's big decisions
-# (Lewis's table: code reviewer = Claude Opus 5.5 / GPT-6 Astra, high).
+# (code reviewer = Claude Opus 5.5 / GPT-6 Astra, high).
 claude = { model = "opus", effort = "high" }
 codex = { model = "gpt-6-astra", effort = "high" }
 
@@ -35,6 +35,7 @@ map_model = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
 plan_timeout_min = 10
 check_timeout_min = 15
 step_timeout_min = 60
+usage_limit_wait_min = 30   # after an agent hits its usage limit, route around it for this long
 
 [ladder]
 # Where a worker steps up to when its work keeps failing review. Never Max.
@@ -42,7 +43,7 @@ codex = [["gpt-6.1-sol", "low"], ["gpt-6.1-sol", "medium"], ["gpt-6.1-sol", "hig
 claude = [["sonnet", "medium"], ["sonnet", "high"], ["opus", "medium"], ["opus", "high"], ["opus", "xhigh"]]
 
 [defaults]
-# Used when no rule clearly fits (Lewis, 6 Nov 2026: GPT-6.1 Sol, medium).
+# Used when no rule clearly fits.
 agent = "codex"
 model = "gpt-6.1-sol"
 effort = "medium"
@@ -54,10 +55,10 @@ codex = { model = "gpt-6.1-sol", effort = "medium" }
 
 [agents]
 # The ACP connector each worker is started with. claude_browser has Claude in Chrome switched on and
-# is only used for steps that need Lewis's signed-in browser (one at a time, across all sessions).
-claude = ["/home/lewismorris/.nvm/versions/node/v24.18.0/bin/claude-agent-acp"]
-claude_browser = ["/home/lewismorris/.local/bin/claude-agent-acp-chrome"]
-codex = ["/home/lewismorris/.nvm/versions/node/v24.18.0/bin/codex-acp"]
+# is only used for steps that need your signed-in browser (one at a time, across all sessions).
+claude = ["claude-agent-acp"]
+claude_browser = ["claude-agent-acp"]     # started with Claude in Chrome switched on
+codex = ["codex-acp"]
 
 [effort_option]
 # What each agent calls its reasoning setting.
@@ -65,10 +66,10 @@ claude = "effort"
 codex = "reasoning_effort"
 
 [browser]
-# Only these agents can use Lewis's signed-in Chrome today.
+# Only these agents can use your signed-in Chrome today.
 signed_in = ["claude"]
 
-# Starting rules (Lewis's table). The lead may deviate but must say why.
+# Who does what. The lead may deviate but must say why.
 [[rule]]
 when = "small fixes, CSS tweaks, config edits, simple scripts"
 use = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
@@ -91,7 +92,7 @@ use = { agent = "claude", model = "sonnet", effort = "medium" }
 when = "complex UI design, front-end architecture, advanced JavaScript, UX improvements"
 use = { agent = "claude", model = "sonnet", effort = "high" }
 [[rule]]
-when = "anything needing Lewis's signed-in browser: checking a live page, Shopify admin, logged-in sites"
+when = "anything needing the user's signed-in browser: checking a live page, Shopify admin, logged-in sites"
 use = { agent = "claude", model = "sonnet", effort = "medium", browser = true }
 [[rule]]
 when = "codebase analysis, technical planning, code reviews"

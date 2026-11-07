@@ -1,4 +1,4 @@
-"""Cross-process locks: the Chrome key (one agent in Lewis's browser at a time) and one job per project."""
+"""Cross-process locks: the Chrome key (one agent in your signed-in browser at a time) and one job per project."""
 import asyncio
 import fcntl
 import os

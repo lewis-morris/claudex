@@ -1,4 +1,7 @@
 #!/bin/sh
-# Claudex launcher: terminal chat by default, `claudex --acp` for Agents of Empires.
-export PATH="/home/lewismorris/.nvm/versions/node/v24.18.0/bin:/home/lewismorris/.local/bin:$PATH"
-exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/home/lewismorris/Projects/claudex"); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$@"
+# Run Claudex straight from a checkout (no install needed): `bin/claudex`, or link it onto your PATH.
+# Uses the system Python by default; set CLAUDEX_PYTHON to use another (it needs prompt_toolkit).
+SELF=$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")
+ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
+PY=${CLAUDEX_PYTHON:-python3}
+exec "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$ROOT" "$@"

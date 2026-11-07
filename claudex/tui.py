@@ -28,6 +28,7 @@ from . import fun
 from .cli import ARG_CHOICES, make_completer
 from .commands import COMMANDS, expand_skill, load_skills
 from .engine import CHECKS, MODES, ROUTES
+from .paths import self_command
 
 PREFS = pathlib.Path.home() / ".config/claudex/ui.json"
 BLOCK_CHARS = 60_000     # one agent's run of output kept on screen
@@ -102,12 +103,14 @@ def monkey(kind, pose, blink=False, look=0, tail=0, face=None):
         g[4][9 + look] = "m"                 # a closed, cheeky eye
     if face == "tongue":
         g[7][7], g[7][8] = "t", "t"
-    if pose == "up":                # arms up: cheering, scratching, thumbs up
+    if pose == "up":                # arms raised high: hooray!
         for y, x in ((10, 2), (10, 3), (10, 12), (10, 13), (11, 2), (11, 3), (11, 12), (11, 13)):
             g[y][x] = "."
-        for y, x in ((7, 2), (8, 2), (7, 13), (8, 13), (9, 3), (9, 12)):
+        for y, x in ((9, 2), (8, 1), (7, 0), (6, 0), (5, 0), (4, 0), (3, 0)):      # left arm, up the side
             g[y][x] = "F"
-        g[6][1], g[6][2], g[6][13], g[6][14] = "S", "S", "S", "S"
+        for y, x in ((9, 13), (8, 14), (7, 15), (6, 15), (5, 15), (4, 15), (3, 15)):  # right arm
+            g[y][x] = "F"
+        g[1][0] = g[2][0] = g[1][15] = g[2][15] = "S"                              # hands in the air
     elif pose == "scratch":         # one hand on the head
         g[10][12] = g[10][13] = g[11][12] = g[11][13] = "."
         g[9][13], g[8][14], g[7][14] = "F", "F", "F"
@@ -405,8 +408,8 @@ class TUI:
 
     def _burst(self):
         cols = [self.p[k] for k in ("accent", "claude", "codex", "good", "banana", "leaf")]
-        self.confetti = [[random.uniform(0.2, 0.8), random.uniform(0.3, 0.6), random.uniform(-0.5, 0.5),
-                          random.uniform(-1.4, -0.6), random.choice(cols)] for _ in range(60)]
+        self.confetti = [[random.uniform(0.15, 0.85), random.uniform(0.3, 0.7), random.uniform(-0.6, 0.6),
+                          random.uniform(-1.6, -0.6), random.choice(cols)] for _ in range(110)]
 
     def _refresh(self):
         if self.app:
@@ -475,6 +478,8 @@ class TUI:
             elif s == "stopped" and age < 6:
                 pose, bubble = "droop", ("…", p["dim"])
                 bob = 1
+            elif s == "limited" and mine and age < 10:      # out of puff: at its usage limit
+                pose, bubble = "droop", ("z" if int(t * 2) % 2 else "Z", p["dim"])
             face = None
             if self.playful and s in ("idle", "done", "pass", "working") and not (s == "working" and mine):
                 mood = (int(t / 2.5) + (2 if kind == "codex" else 0)) % 7   # every so often, something cheeky
@@ -498,7 +503,8 @@ class TUI:
                 for hx in ((3, 12) if int(t * 8) % 2 else (5, 10)):
                     cv.pixel(x + hx, ground + 12 - (int(t * 8 + hx) % 2), p["skin"])
             label = self.NAMES[kind]
-            busy_label = {"working": " is working", "reviewing": " is checking", "checking": " is checking"}
+            busy_label = {"working": " is working", "reviewing": " is checking", "checking": " is checking",
+                          "limited": " is at its limit"}
             if mine and s in busy_label:
                 label += busy_label[s]
             cv.text(x + 8 - len(label) // 2, h - 1, label, p[kind] if mine else p["dim"])
@@ -565,6 +571,8 @@ class TUI:
             pose, bubble = "up", ("♪", p["accent"])
         elif s == "stopped" and age < 6:
             pose, bubble = "droop", ("…", p["dim"])
+        elif s == "limited" and mine and age < 10:
+            pose, bubble = "droop", ("z", p["dim"])
         if self.playful and s in ("idle", "done", "pass", "working") and not (s == "working" and mine):
             m = (int(t / 2.5) + (2 if kind == "codex" else 0)) % 7
             face = {1: "wink", 3: "tongue"}.get(m)
@@ -577,7 +585,7 @@ class TUI:
 
     def _label(self, kind):
         st = self.state
-        words = {"working": "working", "reviewing": "checking", "checking": "checking"}
+        words = {"working": "working", "reviewing": "checking", "checking": "checking", "limited": "at its limit"}
         return words.get(st["state"]) if st["who"] == kind else None
 
     def _draw_small(self, w, h):
@@ -874,9 +882,7 @@ class TUI:
                              f"checks {CHECKS[e.checks]}\nNotes: {e.notes}\n")
         elif cmd in ("rules", "doctor", "log"):
             self._add("sys", f"\n_Running /{cmd}…_\n")
-            me = pathlib.Path(__file__).resolve().parent.parent / "bin/claudex"
-            env = dict(os.environ, **({"CLAUDEX_RULES": os.path.abspath(e.rules_path)} if e.rules_path else {}))
-            args = [str(me), cmd] + (["--cwd", e.cwd] if cmd == "log" else [])
+            args, env = self_command(cmd, *(["--cwd", e.cwd] if cmd == "log" else []), rules=e.rules_path)
             proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT, env=env,
                                                         start_new_session=True)
@@ -916,7 +922,7 @@ def _mix(a, b, t):
 async def run_tui(eng):
     tui = TUI(eng)
     eng.ui = tui
-    tui.blocks.append({"who": "sys", "text": f"_{fun.pick(fun.HELLO)}_\n_{eng.cwd}_"})
+    tui.blocks.append({"who": "sys", "text": f"_{fun.pick(fun.HELLO)}_\n_Working in {pathlib.Path(eng.cwd).name}/_"})
     app = tui.build()
     ticker = asyncio.ensure_future(tui.animate())
     try:

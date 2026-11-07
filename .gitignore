@@ -3,3 +3,4 @@ __pycache__/
 .claudex/
 .pytest_cache/
 composer
+/rules.toml

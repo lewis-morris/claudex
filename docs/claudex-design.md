@@ -4,7 +4,7 @@ Claudex extends the existing Composer (lead plans → one worker at a time over 
 Same code base; new command name `claudex` (`composer` stays as an alias).
 
 ## 1. Lead
-- `[lead]` becomes Claude Opus 5.5, effort high (Lewis's table: architect / technical lead).
+- `[lead]` becomes Claude Opus 5.5, effort high (architect / technical lead).
 - Still a tool-less `claude -p` planner with a JSON schema, now also given the project map and
   decisions log (below).
 - Plan schema gains `big_decisions: [{decision, why, alternatives}]` (may be empty). The lead is told to
@@ -24,7 +24,7 @@ Same code base; new command name `claudex` (`composer` stays as an alias).
 - Snapshot the working tree before and after each step without touching the user's index:
   `GIT_INDEX_FILE=<tmp> git add -A && git write-tree` → tree hash (includes untracked, honours .gitignore).
   Diff = `git diff <before> <after>`. No diff → no review.
-- Reviewer = opposite side of the worker (Lewis's "code reviewer: Opus 5.5 / Astra, high"):
+- Reviewer = opposite side of the worker ("code reviewer: Opus 5.5 / Astra, high"):
   Codex worker → `claude -p` opus high read-only; Claude worker → `codex exec` gpt-6-astra high read-only.
 - Input: step instructions, the user's message, the diff (truncated to ~60k chars), worker's handoff.
 - Output `{verdict: pass|fix, issues: [str], summary: str}`.

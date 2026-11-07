@@ -5,6 +5,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import subprocess
 import time
 import tomllib
@@ -16,7 +17,7 @@ from .ladder import next_rung
 from .locks import CHROME_LOCK, Lock
 
 HOME = pathlib.Path(__file__).resolve().parent.parent
-RULES = pathlib.Path(os.environ.get("CLAUDEX_RULES") or os.environ.get("COMPOSER_RULES") or HOME / "rules.toml")
+from .paths import rules_file
 CATALOG = pathlib.Path.home() / ".config/agent-of-empires/acp_option_catalog.json"
 NOTES_LIMIT = 8000
 MEMORY_LIMIT = 6000
@@ -63,7 +64,7 @@ MAP_SCHEMA = {"type": "object", "properties": {"map": {"type": "string"}}}
 
 
 def load_rules(path=None):
-    return tomllib.loads(pathlib.Path(path or RULES).read_text())
+    return tomllib.loads(pathlib.Path(path or rules_file()).read_text())
 
 
 def catalog_models():
@@ -105,6 +106,32 @@ class StepFailed(Exception):
     pass
 
 
+class WorkerLimited(Exception):
+    """A worker hit its usage limit partway through a step; the step can go to the other agent."""
+
+    def __init__(self, agent, said):
+        super().__init__(f"{agent} is at its usage limit")
+        self.agent, self.said = agent, said
+
+
+# Phrases Claude, Codex and their APIs use when you've run out of usage. Only trusted on errors, or on a
+# short reply that changed no files (so a worker *writing* rate-limit code isn't mistaken for one).
+LIMIT_RE = re.compile(r"usage limit|rate[ -]?limit(?:ed)?|limit (?:has been |was )?reached|hit your (?:\w+ )?limit|"
+                      r"too many requests|\b429\b|quota (?:exceeded|reached)|out of (?:credits|usage)|"
+                      r"reached your (?:\w+ )?(?:limit|quota)|credit balance is too low", re.I)
+RESET_RE = re.compile(r"(?:resets?|try again|available again|back)\s+(?:at|in|after|on)\s+([^\n.;,]{1,40})", re.I)
+SHORT_REPLY = 600
+
+
+def looks_limited(text):
+    return bool(LIMIT_RE.search(text or ""))
+
+
+def reset_hint(text):
+    m = RESET_RE.search(text or "")
+    return m.group(1).strip() if m else None
+
+
 class Engine:
     def __init__(self, cwd, ui, mcp_servers=None, settings=None, session_key=None):
         s = settings or {}
@@ -122,6 +149,7 @@ class Engine:
         self.active = None
         self.cancelled = False
         self.ok = True
+        self.limited = {}           # agent -> (when we noticed, what it said about resetting)
         self.busy = False
         self.local = None
         self._task = None
@@ -312,10 +340,47 @@ class Engine:
         self.cancelled = True
         if self.active:
             self.active.cancel()
-        elif self._task and not self._task.done():
-            self._task.cancel()
+        elif self._task and not self._task.done() and asyncio.current_task() is not self._task:
+            self._task.cancel()   # from outside (Ctrl-C, the UI): interrupt whatever it's waiting on
+        # from inside the job itself the flag is enough: it's checked before every next move
 
     # ---------- the lead ----------
+    # ---------- usage limits ----------
+    def _mark_limited(self, agent, said):
+        agent = base(agent)
+        self.limited[agent] = (time.time(), reset_hint(said))
+        self._act(agent, "limited")
+        self._log(kind="usage_limit", agent=agent, said=(said or "")[:300])
+
+    def _is_limited(self, agent, rules=None):
+        hit = self.limited.get(base(agent))
+        wait = ((rules or {}).get("limits", {}).get("usage_limit_wait_min", 30)) * 60
+        return bool(hit) and time.time() - hit[0] < wait
+
+    def _limit_note(self, agent):
+        hint = (self.limited.get(base(agent)) or (0, None))[1]
+        return f"{agent.title()} is at its usage limit" + (f" (it says it resets {hint})" if hint else "")
+
+    def _limits_summary(self):
+        return "; ".join(self._limit_note(a) for a in self.limited) or "no agent available"
+
+    async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True):
+        """A read-only call to one agent. If it's at its usage limit, the other agent's strongest checker
+        answers instead. Returns (agent, model, effort, answer). Other errors are raised as they are."""
+        alt = other(agent)
+        fb = rules["reviewers"][alt]
+        for a, m, e in ((agent, model, effort), (alt, fb["model"], fb["effort"])):
+            if self._is_limited(a, rules):
+                continue
+            try:
+                return a, m, e, await headless.ask(a, self.cwd, prompt, schema, m, e, timeout, read_files)
+            except Exception as ex:
+                if not looks_limited(str(ex)):
+                    raise
+                self._mark_limited(a, str(ex))
+                await self.ui.say(f"\n_{self._limit_note(a)}, so {other(a).title()} is taking this one._\n\n")
+        raise headless.HeadlessError(f"both agents are at their usage limits: {self._limits_summary()}")
+
     def _lead(self, rules):
         lead = rules["lead"]
         return (lead.get("agent", "claude"), self.lead_model or lead["model"], self.lead_effort or lead["effort"])
@@ -352,7 +417,10 @@ class Engine:
             f"DEFAULT when no rule clearly fits: {json.dumps(rules['defaults'])}\n"
             f"MODELS EACH AGENT OFFERS NOW: {json.dumps(models)}\n"
             f"Only {rules['browser']['signed_in']} can use the user's signed-in browser.\n"
-            "Write each step's instructions so the worker can act without seeing this message.\n")
+            + (f"AT THEIR USAGE LIMIT RIGHT NOW (don't give them steps): "
+               f"{', '.join(a for a in self.limited if self._is_limited(a, rules))}\n"
+               if any(self._is_limited(a, rules) for a in self.limited) else "")
+            + "Write each step's instructions so the worker can act without seeing this message.\n")
         if critique:
             prompt += ("\nA SECOND OPINION on your earlier plan raised these concerns. Revise the plan where they "
                        "are right, and answer EVERY concern in concern_responses (accepted true/false and why):\n"
@@ -361,7 +429,7 @@ class Engine:
             prompt += "\nLeave concern_responses empty.\n"
         agent, model, effort = self._lead(rules)
         timeout = rules.get("limits", {}).get("plan_timeout_min", 10) * 60
-        return await headless.ask(agent, self.cwd, prompt, PLAN_SCHEMA, model, effort, timeout)
+        return (await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout))[3]
 
     def _single(self, text, agent, rules, why):
         d = rules["agent_defaults"][agent]
@@ -382,7 +450,11 @@ class Engine:
             "Agree unless there is a concrete problem; don't nitpick wording or step order.\n\n"
             f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(plan, indent=1)}\n\n{self._memory_block()}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
-        return who, r, await headless.ask(who, self.cwd, prompt, OPINION_SCHEMA, r["model"], r["effort"], timeout)
+        a, m, e, op = await self._ask(who, r["model"], r["effort"], prompt, OPINION_SCHEMA, rules, timeout)
+        if a != who:   # the other side is at its limit: say plainly this isn't a true second opinion
+            op = dict(op, suggestion=(op.get("suggestion") or "") + f" [given by {a.title()}, the same side as the "
+                      f"lead, because {who.title()} is at its usage limit]")
+        return a, {"model": m, "effort": e}, op
 
     # ---------- one message ----------
     async def turn(self, text):
@@ -491,7 +563,7 @@ class Engine:
             await self.ui.plan(entries)
             try:
                 try:
-                    changed = await self._run_step(i, len(steps), s, text, rules)
+                    changed = await self._step_or_handover(i, len(steps), s, text, rules)
                 except gitsnap.SnapshotError as e:
                     raise StepFailed(f"couldn't compare the files before and after ({e}).")
                 changed_any = changed_any or changed
@@ -517,6 +589,50 @@ class Engine:
             if rules.get("memory", {}).get("update_map", True):
                 await self._update_map(text, turn_start, turn_end, rules)
         return "end_turn"
+
+    def _handover_step(self, s, rules, why, said=""):
+        to = other(s["agent"])
+        d = rules["agent_defaults"][to]
+        recap = (f"\n\nHANDOVER: {s['agent'].title()} started this step but {why}. What it said:\n{tail(said, 3000)}\n"
+                 "Some of its changes may already be in the files: check `git status` and `git diff` first, "
+                 "keep what's right, and finish the step." if said else "")
+        return dict(s, agent=to, model=d["model"], effort=s["effort"] if s["effort"] != "low" else d["effort"],
+                    why=f"{s['why']} (handed to {to.title()}: {why})", instructions=s["instructions"] + recap)
+
+    async def _step_or_handover(self, i, n, s, text, rules):
+        """Run a step; if its agent is (or becomes) at its usage limit, the other agent finishes it."""
+        if self._is_limited(s["agent"], rules):
+            if self._can_switch(s, rules):
+                await self.ui.say(f"_{self._limit_note(s['agent'])}, so {other(s['agent']).title()} takes step {i}._\n\n")
+                s = self._handover_step(s, rules, "is at its usage limit")
+            else:
+                raise StepFailed(self._no_switch_reason(s, rules))
+        try:
+            return await self._run_step(i, n, s, text, rules)
+        except WorkerLimited as w:
+            if not self._can_switch(s, rules):
+                raise StepFailed(self._no_switch_reason(s, rules))
+            await self.ui.say(f"\n_{self._limit_note(w.agent)}. Handing step {i} to "
+                              f"{other(w.agent).title()} with a recap of what it did._\n\n")
+            s2 = self._handover_step(s, rules, "hit its usage limit", w.said)
+            try:
+                return await self._run_step(i, n, s2, text, rules)
+            except WorkerLimited:
+                raise StepFailed(f"both agents are at their usage limits: {self._limits_summary()}. "
+                                 "Your work so far is saved; ask again once one of them resets.")
+
+    def _can_switch(self, s, rules):
+        to = other(s["agent"])
+        if self._is_limited(to, rules):
+            return False
+        return not (s["browser"] and to not in rules["browser"]["signed_in"])
+
+    def _no_switch_reason(self, s, rules):
+        to = other(s["agent"])
+        if s["browser"] and to not in rules["browser"]["signed_in"]:
+            return (f"{self._limit_note(s['agent'])}, and this step needs your signed-in Chrome, which only "
+                    f"{s['agent'].title()} can use. Try again once it resets.")
+        return f"both agents are at their usage limits: {self._limits_summary()}. Try again once one resets."
 
     async def _check_decisions(self, text, plan, rules):
         decisions = plan["big_decisions"]
@@ -644,6 +760,9 @@ class Engine:
                     raise
                 except Exception as e:
                     await self._stop_child(name)
+                    if looks_limited(str(e)):
+                        self._mark_limited(agent, str(e))
+                        raise WorkerLimited(agent, str(e))
                     raise StepFailed(f"{agent.title()} stopped with an error: {e}")
                 finally:
                     self.active = None
@@ -673,6 +792,10 @@ class Engine:
                     raise StepFailed("couldn't take a snapshot of the project files after the step (git failed).")
                 diff, files, truncated = gitsnap.diff(self.project_root, before, after,
                                                       int(review.get("diff_limit", 60000)))
+                if not files and len(out.strip()) < SHORT_REPLY and looks_limited(out):
+                    self._log(**row, verdict="usage_limit")      # a short "you've hit your limit" reply
+                    self._mark_limited(agent, out)
+                    raise WorkerLimited(agent, out)
                 if not files:
                     self._log(**row, verdict="no_changes")
                     return False
@@ -718,7 +841,11 @@ class Engine:
                if truncated else "") + f"DIFF:\n{diff}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         try:
-            v = await headless.ask(who, self.cwd, prompt, REVIEW_SCHEMA, r["model"], r["effort"], timeout)
+            used, m, ef, v = await self._ask(who, r["model"], r["effort"], prompt, REVIEW_SCHEMA, rules, timeout)
+            if used != who:
+                v = dict(v, summary=f"(Checked by {used.title()} {m} {ef}, the same side that did the work, "
+                                    f"because {who.title()} is at its usage limit.) " + v["summary"])
+                who, r = used, {"model": m, "effort": ef}
         except Exception as e:
             if self._carry_on(rules):
                 await self.ui.say(f"\n_(Review unavailable: {e}. Carrying on unreviewed, as the rules allow.)_\n\n")
@@ -754,7 +881,7 @@ class Engine:
             + f"DIFF:\n{diff}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         try:
-            v = await headless.ask(agent, self.cwd, prompt, FINAL_SCHEMA, model, effort, timeout)
+            v = (await self._ask(agent, model, effort, prompt, FINAL_SCHEMA, rules, timeout))[3]
         except Exception as e:
             self.ok = self.ok and self._carry_on(rules)
             await self.ui.say(f"\n**Final check couldn't run:** {e}\n\n")
@@ -783,7 +910,7 @@ class Engine:
             f"FILES CHANGED: {', '.join(files)}\n\n"
             f"SHARED PROJECT MEMORY (keep anything here that future agents need in the map):\n{self._memory_block()}\n")
         try:
-            v = await headless.ask(m["agent"], self.cwd, prompt, MAP_SCHEMA, m["model"], m["effort"], 600)
+            v = (await self._ask(m["agent"], m["model"], m["effort"], prompt, MAP_SCHEMA, rules, 600))[3]
         except Exception as e:
             await self.ui.say(f"_(Project map not updated: {e}.)_\n")
             return

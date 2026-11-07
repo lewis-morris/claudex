@@ -1,4 +1,5 @@
 import asyncio
+import os
 import json
 import pathlib
 import subprocess
@@ -450,6 +451,7 @@ def test_skill_expansion_routes_to_the_agent_that_has_it():
     assert expand_skill("/rules", skills) is None
 
 
+@pytest.mark.skipif(not (pathlib.Path.home() / ".claude/skills/deployify").exists(), reason="needs real skills")
 def test_real_skills_load_and_acp_menu_lists_them():
     from claudex.commands import acp_commands, load_skills
     skills = load_skills()
@@ -526,10 +528,7 @@ def test_cancelled_diagnostic_leaves_nothing_running(tmp_path, monkeypatch):
     script = fake / "claudex"
     script.write_text("#!/bin/sh\nsleep 300 &\nsleep 300\n")
     script.chmod(0o755)
-    real_path = pathlib.Path
-    monkeypatch.setattr(server.pathlib, "Path", lambda *a: tmp_path / "claudex" / "server.py"
-                        if a and str(a[0]).endswith("server.py") else real_path(*a))
-    (tmp_path / "claudex").mkdir()
+    monkeypatch.setattr(server, "self_command", lambda *a, rules=None: ([str(script)], dict(os.environ)))
     srv = _server_session(tmp_path)
     groups = []
     real_exec = asyncio.create_subprocess_exec
@@ -833,3 +832,74 @@ def test_old_animation_setting_still_honoured(tmp_path):
     T.PREFS = tmp_path / "ui.json"
     T.PREFS.write_text('{"animate": false, "layout": "wide", "palette": "Jungle"}')
     assert T.TUI(engine.Engine(str(tmp_path), None, session_key="t")).prefs["style"] == "off"
+
+
+# ---------- usage limits ----------
+def test_worker_at_its_limit_hands_the_step_to_the_other_agent(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex"), step("codex", title="More sums")], "big_decisions": [],
+                       "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    answers["final"] = {"verdict": "pass", "problems": [], "summary": "fits"}
+    FakeChild.script = [(None, "", "You've hit your usage limit. Resets at 3pm."),     # Codex runs out
+                        ("a.py", "v\n", "Claude finished it"),                          # Claude finishes step 1
+                        ("b.py", "w\n", "Claude did step 2 too")]                       # step 2 goes straight to Claude
+    e, ui, stop = run(repo)
+    assert e.ok and stop == "end_turn"
+    names = [w.name for w in FakeChild.started]
+    assert names[0] == "codex" and "claude" in names[1]
+    claude = FakeChild.started[1]
+    assert "HANDOVER" in claude.prompts[0] and "Resets at 3pm" in claude.prompts[0]
+    assert "it says it resets 3pm" in ui.all()
+    j = (repo / ".claudex/project/journal.md").read_text()
+    assert "usage limit" not in j or "Claude finished it" in j
+
+
+def test_reviewer_at_its_limit_falls_back_and_says_so(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = [headless.HeadlessError("claude exited 1: Claude usage limit reached"),
+                         {"verdict": "pass", "issues": [], "summary": "fine"}]
+    FakeChild.script = [("a.py", "v\n", "done")]
+    e, ui, stop = run(repo)
+    reviews = [c for c in calls if c[0] == "review"]
+    assert e.ok and [r[1] for r in reviews] == ["claude", "codex"]
+    assert "same side that did the work" in (repo / ".claudex/sessions/t/notes.md").read_text()
+
+
+def test_lead_at_its_limit_lets_codex_plan(job):
+    repo, calls, answers = job
+    answers["plan"] = [headless.HeadlessError("429 Too Many Requests"),
+                       {"steps": [step("claude", "sonnet", "low")], "big_decisions": [], "concern_responses": []}]
+    FakeChild.script = [(None, "", "Here's the answer.")]
+    e, ui, stop = run(repo)
+    plans = [c for c in calls if c[0] == "plan"]
+    assert e.ok and [p[1] for p in plans] == ["claude", "codex"] and plans[1][2] == "gpt-6-astra"
+
+
+def test_both_at_their_limits_stops_and_says_when(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    FakeChild.script = [(None, "", "Rate limit reached. Try again in 2 hours."),
+                        (None, "", "You've hit your usage limit. Resets at 5pm.")]
+    e, ui, stop = run(repo)
+    assert not e.ok and "both agents are at their usage limits" in ui.all()
+    assert "2 hours" in ui.all() and "5pm" in ui.all()
+
+
+def test_writing_rate_limit_code_is_not_a_usage_limit(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("limiter.py", "RATE = 10\n", "Added a rate limiter: returns 429 when the limit is reached.")]
+    e, ui, stop = run(repo)
+    assert e.ok and [w.name for w in FakeChild.started] == ["codex"] and not e.limited
+
+
+def test_browser_step_cant_go_to_codex_when_claude_is_limited(job, monkeypatch, tmp_path):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("claude", "sonnet", browser=True)], "big_decisions": [],
+                       "concern_responses": []}
+    FakeChild.script = [(None, "", "Claude usage limit reached")]
+    e, ui, stop = run(repo)
+    assert not e.ok and "signed-in Chrome" in ui.all() and len(FakeChild.started) == 1

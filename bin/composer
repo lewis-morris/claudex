@@ -1,3 +1,0 @@
-#!/bin/sh
-# Old name for Claudex; kept so existing Agents of Empires sessions keep working.
-exec /home/lewismorris/Projects/claudex/bin/claudex "$@"

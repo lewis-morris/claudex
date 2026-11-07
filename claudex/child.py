@@ -5,7 +5,7 @@ import signal
 
 from .rpc import Peer, RpcError
 
-NODE_BIN = os.path.expanduser("~/.nvm/versions/node/v24.18.0/bin")
+from .paths import chrome_launcher, tool_env, which
 FORWARD = {"agent_message_chunk", "agent_thought_chunk", "tool_call", "tool_call_update"}
 
 
@@ -19,10 +19,17 @@ class Child:
         self.busy = False
 
     async def start(self):
-        env = dict(os.environ)
-        env["PATH"] = NODE_BIN + os.pathsep + env.get("PATH", "")
+        env = tool_env()
+        if self.name == "claude_browser" and "CLAUDE_CODE_EXECUTABLE" not in env:
+            launcher = chrome_launcher()   # Claude with Claude in Chrome switched on
+            if not launcher:
+                raise RuntimeError("couldn't find Claude Code to start with Chrome")
+            env["CLAUDE_CODE_EXECUTABLE"] = launcher
+        exe = which(self.cmd[0])
+        if not exe:
+            raise RuntimeError(f"{self.cmd[0]} isn't installed (see `claudex doctor`)")
         self.proc = await asyncio.create_subprocess_exec(
-            *self.cmd, cwd=self.cwd, env=env, limit=64 * 1024 * 1024,
+            exe, *self.cmd[1:], cwd=self.cwd, env=env, limit=64 * 1024 * 1024,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
 

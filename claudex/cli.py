@@ -137,9 +137,9 @@ def print_help(skills):
 
 def run_tool(*args, rules=None):
     """Run `claudex doctor|rules|log` as its own process so its output can't tangle with the chat."""
-    me = pathlib.Path(__file__).resolve().parent.parent / "bin/claudex"
-    env = dict(os.environ, **({"CLAUDEX_RULES": os.path.abspath(rules)} if rules else {}))
-    subprocess.call([str(me), *args], env=env)
+    from .paths import self_command
+    argv, env = self_command(*args, rules=rules)
+    subprocess.call(argv, env=env)
 
 
 def show_memory(eng):

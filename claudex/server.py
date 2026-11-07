@@ -8,6 +8,7 @@ import subprocess
 import uuid
 
 from . import __version__
+from .paths import self_command
 from .commands import acp_commands, expand_skill, load_skills
 from .engine import CHECKS, EFFORTS, MODES, ROUTES, Engine
 from .rpc import Peer, RpcError
@@ -134,9 +135,7 @@ class Server:
         """Answer /help, /rules, /doctor, /log, /memory, /status directly."""
         cmd = text[1:].split(None, 1)[0]
         if cmd in ("rules", "doctor", "log"):
-            me = pathlib.Path(__file__).resolve().parent.parent / "bin/claudex"
-            args = [str(me), cmd] + (["--cwd", e.cwd] if cmd == "log" else [])
-            env = dict(os.environ, **({"CLAUDEX_RULES": os.path.abspath(e.rules_path)} if e.rules_path else {}))
+            args, env = self_command(cmd, *(["--cwd", e.cwd] if cmd == "log" else []), rules=e.rules_path)
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.STDOUT, env=env,
                                                      start_new_session=True)

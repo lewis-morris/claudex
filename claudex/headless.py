@@ -1,14 +1,14 @@
 """One-shot, read-only calls to Claude or Codex that return JSON matching a schema.
 
 Used for the lead's plan, second opinions, step reviews, the final check and the project map.
-Both are isolated from Lewis's add-ons: no MCP servers, no hooks, no Chrome, read-only tools only.
+Both are isolated from your add-ons: no MCP servers, no hooks, no Chrome, read-only tools only.
 """
 import asyncio
 import json
 import os
 import tempfile
 
-NODE_BIN = os.path.expanduser("~/.nvm/versions/node/v24.18.0/bin")
+from .paths import tool_env
 
 
 class HeadlessError(Exception):
@@ -16,9 +16,7 @@ class HeadlessError(Exception):
 
 
 def _env():
-    env = dict(os.environ)
-    env["PATH"] = NODE_BIN + os.pathsep + os.path.expanduser("~/.local/bin") + os.pathsep + env.get("PATH", "")
-    return env
+    return tool_env()
 
 
 async def _run(cmd, cwd, stdin_text, timeout):

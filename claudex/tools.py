@@ -11,7 +11,8 @@ import sys
 import time
 
 from . import headless
-from .engine import CATALOG, RULES, load_rules
+from .engine import CATALOG, load_rules
+from .paths import DEFAULT_RULES, USER_RULES, rules_file, which
 
 OK, WARN, BAD = "\033[32m✓\033[0m", "\033[33m!\033[0m", "\033[31m✗\033[0m"
 if not sys.stdout.isatty():
@@ -147,15 +148,17 @@ def doctor(live=False):
     print("\nRules")
     try:
         rules = load_rules()
-        line(OK, f"{RULES}")
+        line(OK, f"{rules_file()}" + ("  (the defaults)" if rules_file() == DEFAULT_RULES else ""))
     except Exception as e:
-        line(BAD, f"{RULES} won't load: {e}")
+        line(BAD, f"{rules_file()} won't load: {e}")
         return 1
 
     print("\nWorker connectors")
     for name, cmd in rules["agents"].items():
-        exe = cmd[0]
-        line(OK if os.access(exe, os.X_OK) else BAD, f"{name}: {exe}")
+        exe = which(cmd[0])
+        hint = {"claude-agent-acp": "npm i -g @agentclientprotocol/claude-agent-acp",
+                "codex-acp": "npm i -g @agentclientprotocol/codex-acp"}.get(cmd[0], "")
+        line(OK if exe else BAD, f"{name}: {exe or cmd[0] + ' not found. Install: ' + hint}")
 
     print("\nModels")
     cx = codex_catalog()
@@ -218,11 +221,17 @@ def doctor(live=False):
 
 def show_rules(edit=False):
     if edit:
+        target = rules_file()
+        if target == DEFAULT_RULES:   # never edit the shipped defaults: make your own copy first
+            USER_RULES.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(DEFAULT_RULES, USER_RULES)
+            target = USER_RULES
+            print(f"Made your own copy of the rules at {USER_RULES}")
         editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
-        return subprocess.call([editor, str(RULES)])
+        return subprocess.call([editor, str(target)])
     r = load_rules()
     lead = r["lead"]
-    print(f"Rules file: {RULES}  (re-read on every message; `claudex rules --edit` to change)\n")
+    print(f"Rules file: {rules_file()}  (re-read on every message; `claudex rules --edit` to change)\n")
     print(f"Lead:        {lead.get('agent', 'claude')} {lead['model']} {lead['effort']}")
     d = r["defaults"]
     print(f"Default:     {d['agent']} {d['model']} {d['effort']}")
