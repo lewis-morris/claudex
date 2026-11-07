@@ -1411,3 +1411,27 @@ def test_stale_detection_finds_acp_anywhere(monkeypatch):
     monkeypatch.setattr(paths, "code_stamp", lambda: 9e12)
     monkeypatch.setitem(sys.modules, "subprocess", types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(stdout=fake)))
     assert paths.stale_workers() and paths.stale_workers()[0][0] == 10
+
+
+def test_snapshot_edge_cases(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True, check=True)  # noqa: E731
+    g("init", "-q")
+    (root / ".gitignore").write_text("secret.txt\nbig/\n!node_modules/\n")
+    (root / "*.txt").write_text("odd name")                 # a tracked file literally called '*.txt'
+    (root / "secret.txt").write_text("s")                   # ignored: must stay out
+    g("add", "-f", "--", ":(literal)*.txt", ".gitignore")
+    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+    (root / ".git/info/exclude").write_text("local-only/\n")
+    (root / "local-only").mkdir()
+    (root / "local-only/data.bin").write_text("x")
+    (root / "node_modules/pkg").mkdir(parents=True)
+    (root / "node_modules/pkg/i.js").write_text("1")
+    a = gitsnap.snapshot(str(root))
+    (root / "*.txt").write_text("changed")
+    (root / "secret.txt").write_text("changed too")
+    (root / "local-only/data.bin").write_text("y")
+    (root / "node_modules/pkg/i.js").write_text("2")
+    b = gitsnap.snapshot(str(root))
+    assert gitsnap.changed_files(str(root), a, b) == ["*.txt"]

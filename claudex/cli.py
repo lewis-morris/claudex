@@ -224,8 +224,6 @@ async def chat(eng):
                 print(f"{DIM}Nothing to retry yet.{RESET}")
                 continue
             line = last
-        if not line.startswith("/"):
-            last = line
         if line.startswith("/"):
             skill = expand_skill(line, skills)
             if skill:
@@ -238,6 +236,7 @@ async def chat(eng):
                 if not handled:
                     print(f"{DIM}No such command or skill. Type / to see them.{RESET}")
                 continue
+        last = line                      # what /retry sends again (after any skill expansion)
         # While a job runs, Ctrl-C stops the job (not the chat). The handler is ours only for this job.
         loop = asyncio.get_running_loop()
         task = asyncio.create_task(eng.turn(line))
