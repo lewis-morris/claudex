@@ -1435,3 +1435,24 @@ def test_snapshot_edge_cases(tmp_path):
     (root / "node_modules/pkg/i.js").write_text("2")
     b = gitsnap.snapshot(str(root))
     assert gitsnap.changed_files(str(root), a, b) == ["*.txt"]
+
+
+def test_warm_index_sees_deletions_and_new_ignores(tmp_path):
+    root = tmp_path / "r"
+    root.mkdir()
+    g = lambda *a: subprocess.run(["git", *a], cwd=root, capture_output=True, text=True, check=True)  # noqa: E731
+    g("init", "-q")
+    (root / "node_modules/local").mkdir(parents=True)
+    (root / "node_modules/local/index.js").write_text("1")
+    g("add", "-f", "node_modules/local/index.js")
+    g("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "x")
+    (root / "secret.txt").write_text("s")
+    a = gitsnap.snapshot(str(root))
+    (root / "node_modules/local/index.js").unlink()              # a tracked file in an excluded folder, deleted
+    b = gitsnap.snapshot(str(root))
+    assert gitsnap.changed_files(str(root), a, b) == ["node_modules/local/index.js"]
+    (root / ".git/info/exclude").write_text(".claudex/\nsecret.txt\n")   # now ignored
+    c = gitsnap.snapshot(str(root))
+    (root / "secret.txt").write_text("changed")
+    d = gitsnap.snapshot(str(root))
+    assert gitsnap.changed_files(str(root), c, d) == []

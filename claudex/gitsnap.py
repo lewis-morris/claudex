@@ -111,6 +111,7 @@ def snapshot(cwd):
         if r.returncode != 0:
             LAST_ERROR = (r.stderr or r.stdout).strip().splitlines()[-1][:200] if (r.stderr or r.stdout).strip() else "git add failed"
             return None
+        tracked = []
         if is_repo(root):             # files the project's own git tracks always count, even in ignored folders
             ls = _git(root, "ls-files", "-z", "--cached")
             tracked = [f for f in ls.stdout.split("\0") if f and os.path.lexists(os.path.join(root, f))]
@@ -124,6 +125,19 @@ def snapshot(cwd):
                 if r2.returncode != 0:
                     LAST_ERROR = (r2.stderr.strip().splitlines() or ["git add of tracked files failed"])[-1][:200]
                     return None
+        # The warm index may remember files that are gone, or that are now ignored: drop those, so a deletion
+        # shows as a deletion and a newly ignored file stops counting.
+        fresh_env = dict(os.environ, GIT_INDEX_FILE=tmp + ".empty")
+        eligible = _sg(root, "ls-files", "-z", "--others", "--exclude-standard", "--", ".", *JUNK_SPECS,
+                       env=fresh_env, timeout=300)
+        held = _sg(root, "ls-files", "-z", env=env, timeout=120)
+        if eligible.returncode == 0 and held.returncode == 0:
+            keep = set(f for f in eligible.stdout.split("\0") if f) | set(tracked if is_repo(root) else [])
+            stale = [f for f in held.stdout.split("\0") if f and f not in keep]
+            if stale:
+                _git(root, "--literal-pathspecs", f"--git-dir={_store(root)}", f"--work-tree={root}", "rm",
+                     "--cached", "-q", "--ignore-unmatch", "--pathspec-from-file=-", "--pathspec-file-nul",
+                     env=env, timeout=300, stdin="\0".join(stale))
         out = _sg(root, "write-tree", env=env)
         if out.returncode != 0 or not out.stdout.strip():
             LAST_ERROR = out.stderr.strip()[:200] or "git write-tree failed"
@@ -141,8 +155,9 @@ def snapshot(cwd):
         LAST_ERROR = str(e)[:200]
         return None
     finally:
-        if os.path.exists(tmp):
-            os.unlink(tmp)
+        for leftover in (tmp, tmp + ".empty"):
+            if os.path.exists(leftover):
+                os.unlink(leftover)
 
 
 def changed_files(cwd, before, after):
