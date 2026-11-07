@@ -82,7 +82,9 @@ In the full screen:
 
 | Key | Does |
 |---|---|
-| `/` | menu of every command and skill: keep typing to narrow it, Tab or arrows to pick |
+| `/` | menu of commands: keep typing to narrow it, Tab or arrows to pick |
+| `$` | menu of your skills (`$deployify ship it`) |
+| `/resume` | list earlier conversations here; `/resume 2` carries one on (`claudex --resume`, `claudex -c` at start-up) |
 | `@claude …` / `@codex …` | send just that message to one agent |
 | **F2** | monkeys: playful / calm / off × big / small / tiny (or `/anim calm small`) |
 | **F3** | layout: monkeys on top / at the side / just the chat |
@@ -95,7 +97,7 @@ In the full screen:
 <img src="images/looks.png" alt="Nine looks: playful, calm and off, each big, small or tiny" width="100%">
 
 Skills you've installed for Claude (`~/.claude/skills`) or Codex (`~/.codex/skills`) are in the `/` menu too:
-`/deployify ship the portal` runs that skill on the agent that has it.
+`$deployify ship the portal` runs that skill on the agent that has it.
 
 ## 4. Who does what: `models.md`
 

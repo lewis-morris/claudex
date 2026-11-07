@@ -186,7 +186,7 @@ class Server:
                         return {"stopReason": "cancelled"}
                     finally:
                         e.local = None
-                skill = expand_skill(typed, getattr(e, "skills", {})) if typed.startswith("/") else None
+                skill = expand_skill(typed, getattr(e, "skills", {})) if typed.startswith(("/", "$")) else None
                 if skill:
                     typed = (f"@{skill[1]} " if skill[1] else "") + skill[0]
                 text = (typed + ("\n" + extra if extra else "")).strip()
@@ -240,9 +240,9 @@ class Server:
             lines = ["**Commands:** /init, /shared, /memory, /permissions, /usage (/usage web), /rules, /doctor, /log, "
                      "/status. Routing, Effort, Mode and Checks are "
                      "the pickers. Start a message with @claude or @codex to send it to one agent.", "",
-                     "**Skills** (/name, then what you want done):"]
+                     "**Skills** (type $name, then what you want done):"]
             for name, s in sorted(getattr(e, "skills", {}).items()):
-                lines.append(f"- `/{name}` ({' / '.join(a.title() for a in s['agents'])}): {s['description']}")
+                lines.append(f"- `${name}` ({' / '.join(a.title() for a in s['agents'])}): {s['description']}")
             return "\n".join(lines) + "\n"
         return ""
 

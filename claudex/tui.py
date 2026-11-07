@@ -1000,7 +1000,7 @@ class TUI:
                 return False
             line = self.last_request
             self._add("sys", "\n_Trying again…_\n")
-        if line.startswith("/"):
+        if line.startswith(("/", "$")):
             skill = expand_skill(line, self.skills)
             if skill:
                 line = (f"@{skill[1]} " if skill[1] else "") + skill[0]
@@ -1017,6 +1017,7 @@ class TUI:
         self.speaker = "sys"
         try:
             await self.eng.turn(line)
+            self.save_transcript()
         except Exception as e:
             self._add("sys", f"\n**Something went wrong:** {e}\n")
             self.activity(None, "stopped")
@@ -1035,7 +1036,7 @@ class TUI:
             rows.append("**@claude …** or **@codex …**  send just that message to one agent")
             rows.append("**F2** monkeys: playful/calm/off × big/small/tiny (or **/anim calm small**) · **F3** layout · "
                         "**F4** colours · **PgUp/PgDn** scroll · **Ctrl-C** stop")
-            rows.append(f"\n**Skills** ({len(self.skills)}): type / and start typing a name.")
+            rows.append(f"\n**Skills** ({len(self.skills)}): type **$** and start typing a name, e.g. `$deployify ship it`.")
             self._add("sys", "\n" + "\n".join(rows) + "\n")
         elif cmd in ("auto", "claude", "codex"):
             e.route = cmd
@@ -1044,6 +1045,8 @@ class TUI:
                 setattr(e, cmd, arg)
             else:
                 self._add("sys", f"\n_Choose one of: {' '.join(ARG_CHOICES[cmd])}_\n")
+        elif cmd == "resume":
+            self.resume(arg)
         elif cmd == "dry":
             e.dry_run = not e.dry_run
         elif cmd == "anim":
@@ -1085,6 +1088,40 @@ class TUI:
             self._add("sys", "\n" + out.decode(errors="replace") + "\n")
         else:
             self._add("sys", "\n_No such command or skill. Type / to see them._\n")
+        self._refresh()
+
+    # ---------- resuming an earlier conversation ----------
+    def save_transcript(self):
+        try:
+            keep = [b for b in self.blocks if b.get("who") != "chart" and b.get("text")]
+            self.eng.notes_dir.mkdir(parents=True, exist_ok=True)
+            (self.eng.notes_dir / "transcript.json").write_text(json.dumps(keep[-400:]))
+        except Exception:
+            pass
+
+    def resume(self, arg):
+        from .commands import sessions
+        found = [x for x in sessions(self.eng.project_root) if x["key"] != self.eng.session_key]
+        if not found:
+            self._add("sys", "\n_No earlier Claudex conversations in this project yet._\n")
+            return
+        arg = (arg or "").strip()
+        if not arg or not arg.isdigit() or not 1 <= int(arg) <= len(found):
+            rows = [f"**{n}.** {x['when']} · {x['requests']} request(s) · {x['first']}" for n, x in enumerate(found, 1)]
+            self._add("sys", "\n**Earlier conversations here** (type `/resume 1`, `/resume 2`…):\n" + "\n".join(rows) + "\n")
+            return
+        pick = found[int(arg) - 1]
+        self.save_transcript()
+        self.eng.use_session(pick["key"])
+        saved = self.eng.notes_dir / "transcript.json"
+        try:
+            blocks = json.loads(saved.read_text())
+        except Exception:
+            blocks = _blocks_from_notes(self.eng.notes.read_text(errors="replace"))
+        self.blocks = blocks + [{"who": "sys", "text": f"\n_Carrying on the conversation from {pick['when']}. "
+                                                     "Claude and Codex get its notes, so they know where things stand._"}]
+        self.version += 1
+        self.scroll_back = 0
         self._refresh()
 
     async def _usage(self, arg):
@@ -1131,6 +1168,22 @@ class TUI:
             self._refresh()
 
 
+def _blocks_from_notes(text):
+    """An older conversation (saved before transcripts were) rebuilt from its notes: requests and handovers."""
+    blocks = []
+    for part in re.split(r"^(?=# |## Step )", text, flags=re.M):
+        part = part.strip()
+        if part.startswith("# ") and "Request" in part.split("\n", 1)[0]:
+            blocks.append({"who": "you", "text": part.split("\n", 1)[1].strip() if "\n" in part else ""})
+        elif part.startswith("## Step "):
+            head, _, body = part.partition("\n")
+            who = "codex" if "(codex" in head else "claude" if "(claude" in head else "sys"
+            body = re.split(r"^### ", body, flags=re.M)[0].strip()
+            if body:
+                blocks.append({"who": who, "text": body})
+    return blocks
+
+
 def _tidy_command(text, cwd):
     """'cd <the project> && npm test' is just 'npm test'; project paths are shown relative."""
     text = " ".join(str(text).split())
@@ -1171,11 +1224,14 @@ async def run_tui(eng):
     eng.ui = tui
     tui.blocks.append({"who": "sys", "text": f"_{fun.pick(fun.HELLO)}_\n_Working in {pathlib.Path(eng.cwd).name}/_"})
     app = tui.build()
+    if eng.resume_request:                       # claudex --resume [N] / -c
+        tui.resume("" if eng.resume_request == "pick" else str(eng.resume_request))
     ticker = asyncio.ensure_future(tui.animate())
     try:
         await app.run_async()
     finally:
         ticker.cancel()
+        tui.save_transcript()
         tui.drop_questions()
         if tui.cmd_task and not tui.cmd_task.done():
             tui.cmd_task.cancel()

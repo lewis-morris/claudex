@@ -158,6 +158,7 @@ class Engine:
         self.ui = ui
         self.mcp_servers = mcp_servers or []
         self.rules_path = s.get("rules")
+        self.resume_request = s.get("resume")       # "pick", a number, or None (the screen acts on it)
         self.models_file = s.get("models")
         self.route = s.get("route", "auto")
         self.effort = s.get("effort", "auto")
@@ -192,6 +193,13 @@ class Engine:
         self.journal = self.project / "journal.md"   # every finished job, from every session
         self.session_key = key
         self._job = None
+
+    def use_session(self, key):
+        """Carry on an earlier conversation: its notes, log and handovers become this session's."""
+        self.session_key = key
+        self.notes_dir = self.root / "sessions" / key
+        self.notes = self.notes_dir / "notes.md"
+        self.log = self.notes_dir / "steps.jsonl"
 
     # ---------- settings ----------
     @property

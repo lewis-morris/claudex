@@ -95,8 +95,9 @@ claudex -p "add VAT to the quote total, with tests, then show it on the quote pa
 claudex --dry-run -p "…"   # just show the plan and who'd do what
 ```
 
-Type **`/`** for a menu of every command and every skill you have installed (Claude's marked **[C]**,
-Codex's **[X]**). `/deployify ship it` runs that skill. Start a message with `@claude` or `@codex` to send it
+Type **`/`** for a menu of commands, and **`$`** for a menu of the skills you have installed (Claude's marked
+**[C]**, Codex's **[X]**): `$deployify ship it` runs that skill. `/resume` picks up an earlier conversation in this
+project (`claudex --resume`, or `claudex -c` for the most recent). Start a message with `@claude` or `@codex` to send it
 to just one of them.
 
 | Key | Does |

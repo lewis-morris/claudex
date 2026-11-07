@@ -485,7 +485,7 @@ def test_real_skills_load_and_acp_menu_lists_them():
     skills = load_skills()
     assert "deployify" in skills and not any(n.endswith("-workspace") for n in skills)
     names = [c["name"] for c in acp_commands(skills)]
-    assert "rules" in names and "deployify" in names and "effort" not in names  # pickers cover settings in AoE
+    assert "rules" in names and "deployify" not in names and "effort" not in names  # skills are $name, not /name
 
 
 def test_skill_name_must_end_at_a_space():
@@ -1546,3 +1546,32 @@ def test_permission_answers_by_letter(tmp_path):
         return (await q)["outcome"]["optionId"]
     assert asyncio.run(go("y")) == "a1" and asyncio.run(go("no")) == "r1" and asyncio.run(go("A")) == "a2"
     assert asyncio.run(go("3")) == "r1"
+
+
+def test_dollar_runs_skills_and_slash_menu_is_commands_only():
+    from claudex.commands import expand_skill
+    from claudex.cli import make_completer
+    from prompt_toolkit.document import Document
+    skills = {"deployify": {"description": "ship it", "agents": ["claude"]}}
+    assert expand_skill("$deployify the portal", skills) == ("Use the deployify skill. the portal", "claude")
+    menu = make_completer(skills)
+    slash = [c.text for c in menu.get_completions(Document("/de"), None)]
+    dollar = [c.text for c in menu.get_completions(Document("$de"), None)]
+    assert not any("deployify" in c for c in slash) and dollar == ["$deployify "]
+
+
+def test_resume_an_earlier_conversation(job, tmp_path):
+    from claudex import commands
+    from claudex.tui import _blocks_from_notes
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "Made a.py for the quotes.")]
+    asyncio.run(engine.Engine(str(repo), UI(), settings={}, session_key="older").turn("build the quote maths"))
+    found = commands.sessions(repo)
+    assert found[0]["key"] == "older" and "quote maths" in found[0]["first"]
+    blocks = _blocks_from_notes((repo / ".claudex/sessions/older/notes.md").read_text())
+    assert blocks[0] == {"who": "you", "text": "build the quote maths"} and blocks[1]["who"] == "codex"
+    T, t, e = _tui(repo)
+    t.resume("1")
+    assert e.session_key == "older" and any("quote maths" in b["text"] for b in t.blocks)

@@ -48,6 +48,9 @@ def chat_parser():
     ap.add_argument("--models", metavar="FILE", help="use this models.md (who does what) for this session")
     ap.add_argument("--dry-run", action="store_true", help="show the plan and who'd do each part; change nothing")
     ap.add_argument("--plain", action="store_true", help="simple line-by-line chat instead of the full screen")
+    ap.add_argument("--resume", nargs="?", const="pick", metavar="N",
+                    help="carry on an earlier conversation in this project (no number: show the list)")
+    ap.add_argument("-c", "--continue", dest="cont", action="store_true", help="carry on the most recent conversation")
     return ap
 
 
@@ -59,7 +62,8 @@ def settings_from(args):
         checks = "off"
     return {"route": args.route, "mode": args.mode, "effort": args.effort, "checks": checks,
             "lead_model": args.lead_model, "lead_effort": args.lead_effort, "rules": args.rules, "models": args.models,
-            "dry_run": args.dry_run, "unattended": args.unattended}
+            "dry_run": args.dry_run, "unattended": args.unattended,
+            "resume": "1" if args.cont else args.resume}
 
 
 def main():

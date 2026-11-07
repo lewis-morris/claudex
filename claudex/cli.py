@@ -99,6 +99,14 @@ def make_completer(skills):
                         yield Completion("@" + who + " ", -len(text), display="@" + who,
                                          display_meta=f"send just this message to {who.title()}")
                 return
+            if text.startswith("$") and " " not in text:      # $ = skills
+                word = text[1:].lower()
+                ranked = sorted((not n.lower().startswith(word), n) for n in skills if word in n.lower())
+                for _, name in ranked:
+                    sk = skills[name]
+                    yield Completion("$" + name + " ", -len(text), display=f"${name}",
+                                     display_meta=f"[{skill_tag(sk)}] {sk['description']}")
+                return
             if not text.startswith("/"):
                 return
             if " " in text:
@@ -112,13 +120,6 @@ def make_completer(skills):
                 if name.startswith(word):
                     yield Completion("/" + name + (" " if hint else ""), -len(text), display="/" + name,
                                      display_meta=desc)
-            ranked = sorted((not n.lower().startswith(word), n) for n in skills if word in n.lower())
-            for _, name in ranked:
-                s = skills[name]
-                tag = skill_tag(s)
-                if True:
-                    yield Completion("/" + name + " ", -len(text), display=f"/{name}",
-                                     display_meta=f"[{tag}] {s['description']}")
 
     return SlashMenu()
 
@@ -129,10 +130,10 @@ def print_help(skills):
         left = f"/{name}" + (f" {hint}" if hint else "")
         print(f"  {CYAN}{left:<44}{RESET}{desc}")
     print(f"  {CYAN}{'@claude … / @codex …':<44}{RESET}send just that message to one agent")
-    print(f"\n{BOLD}Skills{RESET}  {DIM}([C] Claude, [X] Codex; /name then what you want done){RESET}")
+    print(f"\n{BOLD}Skills{RESET}  {DIM}([C] Claude, [X] Codex; type $ then the name, then what you want done){RESET}")
     for name, s in sorted(skills.items()):
         tag = skill_tag(s)
-        print(f"  {CYAN}/{name:<30}{RESET}{DIM}[{tag:<2}]{RESET} {s['description']}")
+        print(f"  {CYAN}${name:<30}{RESET}{DIM}[{tag:<2}]{RESET} {s['description']}")
     print()
 
 
@@ -225,7 +226,7 @@ async def chat(eng):
                 print(f"{DIM}Nothing to retry yet.{RESET}")
                 continue
             line = last
-        if line.startswith("/"):
+        if line.startswith(("/", "$")):
             skill = expand_skill(line, skills)
             if skill:
                 message, forced = skill
@@ -264,10 +265,21 @@ async def run(args, settings):
     if args.print and not sys.stdin.isatty():
         settings = dict(settings, unattended=True)       # a script: nobody to ask
     eng = Engine(os.path.abspath(args.cwd), TerminalUI(), settings=settings)
+    want = settings.get("resume")
+    if want and (args.print or getattr(args, "plain", False) or not sys.stdout.isatty()):
+        from .commands import sessions
+        found = sessions(eng.project_root)
+        if want == "pick" or not str(want).isdigit() or not 1 <= int(want) <= len(found):
+            for n, x in enumerate(found, 1):
+                print(f"  {n}. {x['when']} · {x['requests']} request(s) · {x['first']}")
+            print(f"{DIM}Carry one on with: claudex --resume N{RESET}" if found else "No earlier conversations here.")
+            return 0
+        eng.use_session(found[int(want) - 1]["key"])
+        print(f"{DIM}Carrying on the conversation from {found[int(want) - 1]['when']}.{RESET}")
     try:
         if args.print:
             text = args.print
-            skill = expand_skill(text, load_skills()) if text.startswith("/") else None
+            skill = expand_skill(text, load_skills()) if text.startswith(("/", "$")) else None
             if skill:
                 text = (f"@{skill[1]} " if skill[1] else "") + skill[0]
             stop = await eng.turn(text)

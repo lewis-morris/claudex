@@ -7,7 +7,8 @@ SKILL_DIRS = {"claude": pathlib.Path.home() / ".claude/skills", "codex": pathlib
 # (name, argument hint, what it does). Settings commands only make sense in the terminal; in Agents of
 # Empires the same settings are the Routing / Effort / Mode / Checks pickers.
 COMMANDS = [
-    ("help", "", "show every command and skill"),
+    ("help", "", "show every command (type $ for skills)"),
+    ("resume", "[number]", "pick up an earlier Claudex conversation in this project"),
     ("auto", "", "Claudex decides who does each part (default)"),
     ("claude", "", "send everything to Claude"),
     ("codex", "", "send everything to Codex"),
@@ -29,7 +30,7 @@ COMMANDS = [
     ("usage", "web", "tokens across Claude and Codex as a coloured chart; /usage web opens a live page"),
     ("quit", "", "leave Claudex"),
 ]
-TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry"}
+TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry", "resume"}
 
 
 def _describe(skill_md):
@@ -61,11 +62,11 @@ def load_skills():
 
 
 def expand_skill(text, skills):
-    """'/deployify ship it' -> ('Use the deployify skill. ship it', 'claude') when it's a skill, else None.
+    """'$deployify ship it' -> ('Use the deployify skill. ship it', 'claude') when it's a skill, else None.
 
     A skill only one agent has goes to that agent; one both have is left to the lead.
     """
-    m = re.match(r"^/([\w.-]+)(?:\s+(.*))?$", text.strip(), re.S)  # "/skill" or "/skill words", not "/skill/path"
+    m = re.match(r"^[$/]([\w.-]+)(?:\s+(.*))?$", text.strip(), re.S)  # "$skill words" (or the old "/skill")
     if not m or m.group(1) not in skills:
         return None
     name, rest = m.group(1), (m.group(2) or "").strip()
@@ -79,8 +80,24 @@ def acp_commands(skills):
     """The `available_commands_update` list for Agents of Empires."""
     cmds = [{"name": n, "description": d, **({"input": {"hint": h}} if h else {})}
             for n, h, d in COMMANDS if n not in TERMINAL_ONLY]
-    for name, s in sorted(skills.items()):
-        who = " / ".join(a.title() for a in s["agents"])
-        cmds.append({"name": name, "description": f"[{who} skill] {s['description']}",
-                     "input": {"hint": "what you want done"}})
-    return cmds
+    return cmds          # skills aren't slash commands: type $name (see /help for the list)
+
+
+def sessions(project_root, limit=12):
+    """This project's earlier Claudex conversations, newest first: [{key, when, first, requests}]."""
+    import datetime
+    import pathlib
+    out = []
+    for d in (pathlib.Path(project_root) / ".claudex" / "sessions").glob("*"):
+        notes = d / "notes.md"
+        if not notes.is_file():
+            continue
+        text = notes.read_text(errors="replace")
+        asks = re.findall(r"^# [^\n]*Request\n(.+?)(?=\n\n|\Z)", text, re.M | re.S)
+        if not asks:
+            continue
+        mtime = notes.stat().st_mtime
+        out.append({"key": d.name, "mtime": mtime, "requests": len(asks),
+                    "when": datetime.datetime.fromtimestamp(mtime).strftime("%a %d %b %H:%M"),
+                    "first": " ".join(asks[0].split())[:90]})
+    return sorted(out, key=lambda x: -x["mtime"])[:limit]
