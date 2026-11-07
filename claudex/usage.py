@@ -231,8 +231,11 @@ def work_report(since, project=None):
                     elif verdict in ("pass", "no_changes", "not_reviewed", "unreviewed", None):
                         a["steps"] += 1      # whoever finished a part gets the credit, whichever try it was
                         why = (r.get("why") or r.get("title") or "").strip()
+                        if len(why) > 160:              # shorten the reason, never the handover part
+                            base_, _, handed = why.partition(" (handed")
+                            why = base_[:110].rstrip() + "…" + ((" (handed" + handed)[:120] if handed else "")
                         if why:
-                            reasons[key][why[:140]] += 1
+                            reasons[key][why] += 1
                 elif kind in ("second_opinion", "final_check"):
                     checks[f"{kind.replace('_', ' ')}: {r.get('verdict')}"] += 1
                 elif kind == "usage_limit":

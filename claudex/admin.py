@@ -330,7 +330,7 @@ def show_models(cwd=".", init_file=False, edit=False, global_=False, models_file
         if edit:
             return subprocess.call([os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano", str(target)])
         return 0
-    rules = load_rules(project_root=None if global_ else root, models_file=models_file)
+    rules = load_rules(project_root=None if global_ else root, models_file=None if global_ else models_file)
     src = rules.get("_models_file") or f"{rules_file()} (no models.md yet)"
     print(f"{B}Who does what{RESET}  ({root.name})   from: {src}\n")
     lead, d = rules["lead"], rules["defaults"]

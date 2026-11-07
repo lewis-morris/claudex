@@ -186,7 +186,25 @@ def _stop_in(folder, mark=None):
     the contender's group isn't enough: anything carrying this run's marker (every process it started inherits
     it), or still working inside the folder, is ours to stop. Needs Linux's /proc; elsewhere it's best effort."""
     import signal
-    if not os.path.isdir("/proc"):
+    if not os.path.isdir("/proc"):          # macOS and friends: find marked processes through `ps`
+        if not mark:
+            return
+        for attempt in range(3):
+            try:
+                ps = subprocess.run(["ps", "eww", "-ax", "-o", "pid=,command="], capture_output=True, text=True,
+                                    timeout=10).stdout
+            except Exception:
+                return
+            found = [int(l.split(None, 1)[0]) for l in ps.splitlines()
+                     if f"{MARK}={mark}" in l and l.split(None, 1)[0].isdigit() and int(l.split(None, 1)[0]) != os.getpid()]
+            if not found:
+                return
+            for pid in found:
+                try:
+                    os.kill(pid, signal.SIGTERM if attempt == 0 else signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            time.sleep(1)
         return
     root = str(pathlib.Path(folder).resolve())
     me = os.getpid()
