@@ -2,6 +2,8 @@
 part, the opposite side reviews every change, and everything lands in shared project memory."""
 import asyncio
 import datetime
+import fnmatch
+import hashlib
 import json
 import os
 import pathlib
@@ -11,7 +13,7 @@ import time
 import tomllib
 import uuid
 
-from . import fun, gitsnap, headless, permissions, usage
+from . import fun, gitsnap, headless, permissions, usage, project_settings
 from .child import Child
 from .ladder import next_rung
 from .locks import CHROME_LOCK, Lock
@@ -25,6 +27,9 @@ JOURNAL_LIMIT = 12000
 INSTRUCTIONS_LIMIT = 40000   # per file; house rules are never cut silently
 HANDOFF_LIMIT = 1500         # each worker's handover kept for the rest of the job and in the journal
 INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")  # Claude reads one, Codex the other; Claudex shows both to everyone
+# How much of its own file each agent reads by itself (checked with a canary word at the end of a long file):
+# Codex stops at about 32 KiB of AGENTS.md; Claude Code reads a 50 KB CLAUDE.md whole. Over the cap, it's pasted.
+NATIVE_LIMIT = {"codex": 32000, "claude": None}
 DECISION_TAG = "DECISION NEEDED:"
 SNAP_HELP = ("Claudex needs git installed to compare files (`git --version`). Run `claudex doctor` to check, "
              "or use `--checks off` to work without checks.")
@@ -46,6 +51,81 @@ MODES = {
 LEGACY_MODES = {"default": "ask", "acceptEdits": "auto", "bypassPermissions": "unrestricted"}
 
 
+# Files whose change can alter how the project is laid out, built, run or tested: worth a map refresh.
+MAP_FILES = {"package.json", "pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", "cargo.toml", "go.mod",
+             "gemfile", "composer.json", "makefile", "dockerfile", "procfile", "tsconfig.json", "manage.py",
+             "claude.md", "agents.md", "readme.md"}
+MAP_PATTERNS = ("docker-compose*", "*.config.js", "*.config.ts", "*.config.mjs", "requirements*.txt",
+                ".github/workflows/*", "deploy*", "*.sql", "*migrations/*", "*.toml")
+
+
+def map_worthy(changes):
+    """True when a job added, deleted or renamed files, or touched how the project is built, run or deployed."""
+    for status, f in changes:
+        if status[:1] in ("A", "D", "R", "C"):
+            return True
+        path = pathlib.PurePosixPath(f)
+        if path.name.lower() in MAP_FILES or any(path.match(pat) or fnmatch.fnmatch(f, pat) for pat in MAP_PATTERNS):
+            return True
+    return False
+
+
+def human_actions(text):
+    """Things the user must answer or do. Reads the structured 'Questions for you' section (one item per
+    'Q<n>. Title' plus its question line, and each numbered line under 'Things only you can do'), and still
+    accepts the older plain 'NEEDS YOU:' marker and Markdown 'Needs you:' headings."""
+    items, current, fenced, section, question = [], [], False, None, None
+
+    def flush_question():
+        nonlocal question
+        if question:
+            items.append(" ".join(question).strip())
+            question = None
+
+    for line in text.splitlines() + [""]:
+        if line.lstrip().startswith("```"):
+            fenced = not fenced
+        if fenced:
+            continue
+        bare = re.sub(r"[#*_`]", "", line).strip().lower().rstrip(":")
+        if bare in ("questions for you", "things only you can do"):
+            flush_question()
+            section = bare
+            continue
+        if section and re.match(r"^\s*#{1,6}\s", line) and "question" not in bare and "only you" not in bare \
+                and not re.match(r"^[a-z &/'-]{1,60}$", bare):
+            flush_question()
+            section = None
+        if section == "questions for you":
+            q = re.match(r"^\s*(?:[-*]\s+|#{1,6}\s+)?\*{0,2}Q(\d+)\.\s*(.+?)\*{0,2}\s*$", line)
+            if q:
+                flush_question()
+                question = [f"Q{q.group(1)}. {q.group(2).strip('* ')}:"]
+            elif question and len(question) == 1 and line.strip() and not re.match(
+                    r"^\s*(?:[-*]\s+)?(?:\*\*)?(?:[A-F][).:]|why|if you|options|reply like)", line, re.I):
+                question.append(re.sub(r"^\s*[-*]\s+", "", line).strip())
+            continue
+        if section == "things only you can do":
+            t = re.match(r"^\s*(?:\d+[.)]|[-*])\s+(.+)", line)
+            if t:
+                items.append(t.group(1).strip())
+            continue
+        match = re.match(r"^\s*(?:[-*]\s+|#{1,6}\s+)?(?:\*\*)?needs you(?:\*\*)?\s*:(?:\*\*)?\s*(.*)",
+                         line, re.I)
+        if match or not line.strip():
+            if current:
+                item = " ".join(current).strip()
+                if item.lower().rstrip(".") not in ("none", "nothing", "not needed"):
+                    items.append(item)
+                current = []
+            if match:
+                current = [match.group(1)]
+        elif current:
+            current.append(line.strip())
+    flush_question()
+    return items
+
+
 def norm_mode(mode):
     mode = LEGACY_MODES.get(mode, mode)
     return mode if mode in MODES else "auto"
@@ -64,6 +144,18 @@ OPINION_SCHEMA = {"type": "object", "properties": {
     "verdict": {"enum": ["agree", "concerns"]}, "concerns": {"type": "array", "items": {"type": "string"}},
     "suggestion": {"type": "string"}}}
 # One shape for every worker's reply, whichever agent wrote it: easier to read, and shorter for the checker.
+QUESTIONS_SHAPE = (
+    "If the user must answer something or do a manual task, end your reply with a section headed "
+    "'Questions for you' (only work the human must do, never your own tasks; carry on with independent work). "
+    "Start it with one line: 'Reply like: 1A, 2B, 3 skip, 5: <your words>'. Then number the questions, grouped "
+    "under short topic headings, with anything that blocks work or carries a security risk first. Each "
+    "question is: a bold line 'Q<n>. Short title'; the question in one plain sentence; 'Why: ' what it matters "
+    "for or blocks, in one line; lettered options 'A) ', 'B) ', 'C) ', each short, with one marked "
+    "'(recommended)' and a few words of reason (free text only where options make no sense, then list the "
+    "likely candidates); and 'If you don't answer: ' the safe default or 'waits'. Put several 'which customer "
+    "or owner is this?' items in one table (Item | Best guess | Confirm Y/N or name) under one question. Put "
+    "tasks only the human can do under a heading 'Things only you can do', one numbered line each, saying "
+    "where. Drop questions that are already answered; mark repeats '(still open)'.")
 REPLY_SHAPE = (
     "Your reply is shown to the user as it is, and the other agent checks it before they act on it. If you "
     "changed files, end with this, in plain British English, leaving out any line that would be empty:\n"
@@ -71,7 +163,7 @@ REPLY_SHAPE = (
     "**Changed:** a short bullet per file: what changed (a table only if before/after needs comparing).\n"
     "**Checked:** what you ran or read to confirm it, and the result.\n"
     "**Not checked:** anything you couldn't confirm, or assumed.\n"
-    "**Needs you:** a decision or action for the user, if any.\n"
+    "Put anything for the user in the 'Questions for you' section below, not in these lines.\n"
     "No preamble, no restating the request, no closing offers; keep it under about 250 words unless a table "
     "is needed. If you only answered a question, just answer it.")
 REFUSAL_RETRIES = 3       # how many times a worker whose turn ended on a 'no' is told why and carries on
@@ -92,7 +184,7 @@ def _merge(base_, over):
     return out
 
 
-def load_rules(path=None, project_root=None, models_file=None):
+def load_rules(path=None, project_root=None, models_file=None, model_preferences=True):
     """Your rules (or the defaults), with the project's own .claudex/rules.toml layered on top if it has one."""
     rules = tomllib.loads(pathlib.Path(path or rules_file()).read_text())
     if project_root:
@@ -111,7 +203,8 @@ def load_rules(path=None, project_root=None, models_file=None):
                     base_perms[k] = v
             rules["permissions"] = base_perms
     from . import models
-    return models.apply(rules, models.find(project_root, models_file))
+    rules = models.apply(rules, models.find(project_root, models_file))
+    return project_settings.apply_models(rules, project_settings.load(project_root)) if project_root and model_preferences else rules
 
 
 def catalog_models():
@@ -137,7 +230,17 @@ def base(agent):
 
 
 def tail(text, limit):
-    return text if len(text) <= limit else "…(earlier text trimmed)…\n" + text[-limit:]
+    """The last `limit` characters, starting at a whole entry (a '#' heading) or at least a whole line,
+    so what's kept never opens mid-sentence."""
+    if len(text) <= limit:
+        return text
+    cut = text[-limit:]
+    m = re.search(r"(?m)^#{1,3} ", cut)
+    if m and m.start() <= len(cut) // 2:
+        cut = cut[m.start():]
+    elif "\n" in cut[:len(cut) // 2]:
+        cut = cut[cut.index("\n") + 1:]
+    return "…(earlier text trimmed)…\n" + cut
 
 
 def repo_root(cwd):
@@ -167,7 +270,10 @@ from .limits import error_is_limit, reply_is_limit, reset_hint  # noqa: E402
 class Engine:
     def __init__(self, cwd, ui, mcp_servers=None, settings=None, session_key=None):
         self.refusals = []          # actions Claudex said no to (so a worker can be told why)
-        s = settings or {}
+        self.cwd = str(cwd)
+        self.project_root = repo_root(self.cwd) or self.cwd
+        saved = project_settings.load(self.project_root)
+        s = {**saved, **{k: v for k, v in (settings or {}).items() if v is not None}}
         self.cwd = str(cwd)
         self.ui = ui
         self.mcp_servers = mcp_servers or []
@@ -176,8 +282,11 @@ class Engine:
         self.models_file = s.get("models")
         self.route = s.get("route", "auto")
         self.effort = s.get("effort", "auto")
-        self.mode = norm_mode(s.get("mode", "auto"))
+        self.mode = norm_mode(s.get("mode", "unrestricted"))
         self.unattended = bool(s.get("unattended"))   # nobody to ask: "ask the human" becomes "no"
+        self._human_waits = 0
+        self._human_since = None
+        self._human_elapsed = 0.0
         self._rules = None
         self.checks = s.get("checks", "full")
         self.dry_run = s.get("dry_run", False)
@@ -250,7 +359,7 @@ class Engine:
                 exclude.write_text(text + ("" if text.endswith("\n") or not text else "\n") + ".claudex/\n")
 
     def _read(self, path, limit):
-        return tail(path.read_text(), limit) if path.exists() else "(none yet)"
+        return tail(path.read_text(errors="replace"), limit) if path.exists() else "(none yet)"
 
     def _append(self, path, text):
         if self.dry_run:
@@ -281,32 +390,92 @@ class Engine:
             except Exception:
                 pass
 
-    def _instructions(self):
+    def _native(self, agent):
+        """The instruction file this agent already loads by itself (Claude Code reads CLAUDE.md, Codex reads
+        AGENTS.md), so it needn't be pasted in again. None when unknown, or when switched off in the rules."""
+        if not agent or not (self._rules or {}).get("memory", {}).get("native_instructions", True):
+            return None
+        return {"claude": "CLAUDE.md", "codex": "AGENTS.md"}.get(base(agent))
+
+    def _instructions(self, agent=None):
         """The project's own agent instructions. Claude only reads CLAUDE.md and Codex only AGENTS.md, so both
-        are shown to everyone: one set of house rules for the whole team."""
-        parts, seen = [], set()
+        are shown to everyone: one set of house rules for the whole team. The file an agent loads by itself
+        is named, not repeated."""
+        parts, seen, native = [], set(), self._native(agent)
         for folder in dict.fromkeys([self.project_root, self.cwd]):
             for name in INSTRUCTION_FILES:
                 f = pathlib.Path(folder) / name
                 if not f.is_file() or f.resolve() in seen:
                     continue
                 seen.add(f.resolve())
+                cap = NATIVE_LIMIT.get(base(agent)) if agent else None
+                if name == native and (cap is None or f.stat().st_size <= cap):
+                    parts.append(f"--- {f} ---\n(You already have this file: {base(agent).title()} loads it "
+                                 "itself. Follow it.)")
+                    continue
                 text = f.read_text(errors="replace")
                 if len(text) > INSTRUCTIONS_LIMIT:   # never drop rules silently: say so, and where the rest is
                     text = (text[:INSTRUCTIONS_LIMIT] + f"\n[… {f} continues. Read the whole file before you start; "
                             "its rules all apply.]")
                 parts.append(f"--- {f} ---\n{text}")
+        saved = project_settings.load(self.project_root)
+        for key, title in (("description", "PROJECT BRIEF"), ("base_prompt", "PROJECT BASE PROMPT")):
+            if saved.get(key):
+                parts.append(f"--- {title} ---\n{saved[key]}")
         return "\n".join(parts) or "(none)"
 
-    def _memory_block(self):
-        """The one shared memory. Every role (lead, second opinion, workers, reviewers, final check) gets this."""
-        return (f"PROJECT INSTRUCTIONS (CLAUDE.md and AGENTS.md; follow both):\n{self._instructions()}\n\n"
-                f"PROJECT MAP:\n{self._read(self.map, MEMORY_LIMIT)}\n\n"
-                f"PAST DECISIONS:\n{self._read(self.decisions, MEMORY_LIMIT)}\n\n"
-                f"RECENT JOBS IN THIS PROJECT (all sessions; older ones are in {self.journal}):\n"
-                f"{self._read(self.journal, JOURNAL_LIMIT)}\n\n"
-                f"THIS JOB SO FAR (every handover and check, never trimmed):\n{self._job_so_far()}\n\n"
-                f"THIS SESSION'S EARLIER NOTES:\n{self._read(self.notes, NOTES_LIMIT)}")
+    def _notes_before_job(self):
+        """This session's notes from before the current job. The current job's replies are already in
+        THIS JOB SO FAR, so they aren't sent twice."""
+        if not self.notes.exists():
+            return "(none yet)"
+        raw = self.notes.read_bytes()
+        upto = (self._job or {}).get("notes_at")
+        text = (raw if upto is None else raw[:upto]).decode("utf-8", "replace")
+        return tail(text, NOTES_LIMIT) if text.strip() else "(none yet)"
+
+    def _memory_parts(self, agent=None):
+        """The shared memory as (key, title, text), steadiest first so repeated calls share a cached start."""
+        return [
+            ("instructions", "PROJECT INSTRUCTIONS (CLAUDE.md and AGENTS.md; follow both)", self._instructions(agent)),
+            ("map", "PROJECT MAP", self._read(self.map, MEMORY_LIMIT)),
+            ("decisions", "PAST DECISIONS", self._read(self.decisions, MEMORY_LIMIT)),
+            ("journal", f"RECENT JOBS IN THIS PROJECT (all sessions; older ones are in {self.journal})",
+             self._read(self.journal, JOURNAL_LIMIT)),
+            ("notes", "THIS SESSION'S EARLIER NOTES", self._notes_before_job()),
+            ("job", "THIS JOB SO FAR (every handover and check, never trimmed)", self._job_so_far()),
+        ]
+
+    # Who needs what. Old jobs and session chatter help the planner and the workers; a check of a diff
+    # needs the rules, the decisions, the map and this job.
+    ALL_MEMORY = ("instructions", "map", "decisions", "journal", "notes", "job")
+    CHECK_MEMORY = ("instructions", "map", "decisions", "job")
+
+    def _memory_block(self, parts=ALL_MEMORY, agent=None):
+        """The one shared memory, or the slice of it a role needs."""
+        return "\n\n".join(f"{title}:\n{text}" for key, title, text in self._memory_parts(agent) if key in parts)
+
+    def _worker_memory(self, c):
+        """The memory for a worker's next prompt. Workers keep one conversation across steps and jobs, so a
+        part it has already been sent unchanged is named instead of pasted again. Everything is sent again
+        when the conversation is new to this Claudex, or looks squashed (its context shrank)."""
+        sent = getattr(c, "memory_sent", None)
+        job = (self._job or {}).get("id")
+        squashed = getattr(c, "squashed", False)   # the worker's context shrank at some point since the last brief
+        blind = (getattr(c, "usage", None) or {}).get("used") is None   # it never says, so squashes can't be seen
+        if sent is None or squashed or (blind and getattr(c, "memory_job", None) != job):
+            sent = {}
+        c.squashed, c.memory_job = False, job
+        out, now = [], {k: v for k, v in sent.items() if k == "shapes"}   # the reply shape is tracked too
+        for key, title, text in self._memory_parts(base(c.name)):
+            digest = hashlib.sha1(text.encode("utf-8", "surrogateescape")).hexdigest()
+            now[key] = digest
+            if key != "job" and sent.get(key) == digest:
+                out.append(f"{title}: unchanged since you were last given it earlier in this conversation.")
+            else:
+                out.append(f"{title}:\n{text}")
+        c.memory_sent = now
+        return "\n\n".join(out)
 
     def _keep_handover(self, i, attempt, agent, out):
         """Save the whole handover to a file; memory gets its start and end (warnings are often up front)
@@ -443,7 +612,16 @@ class Engine:
                 await self.ui.say(f"\n_🛡 Needed your OK, but nobody's here to ask, so it was refused: "
                                   f"{agent.title()} wanted to {kind} {what[:120]} ({why})._\n")
                 return answer("deny", "nobody to ask", why)
-            choice = await self.ui.permission(params)
+            if not self._human_waits:
+                self._human_since = time.monotonic()
+            self._human_waits += 1
+            try:
+                choice = await self.ui.permission(params)
+            finally:
+                self._human_waits -= 1
+                if not self._human_waits:
+                    self._human_elapsed += time.monotonic() - self._human_since
+                    self._human_since = None
             picked = ((choice or {}).get("outcome") or {}).get("optionId")
             kind_of = next((o.get("kind", "") for o in opts if o.get("optionId") == picked), "")
             permissions.log_decision(log, agent=agent, kind=kind, what=what[:300],
@@ -451,6 +629,11 @@ class Engine:
                                      why=why[:300], mode=self.mode, session=self.session_key)
             return choice
 
+        if self.mode == "unrestricted":
+            # Some connectors still emit permission requests in their permissive mode.
+            # Honour the selected mode here too, using a one-request approval.
+            return answer("allow", "unrestricted", "you selected unrestricted mode") or {
+                "outcome": {"outcome": "cancelled"}}
         if self.mode == "ask":
             return await human("you chose to approve everything yourself")
         in_force = [self.rules_path or str(rules_file()), self.models_file, rules.get("_models_file")]
@@ -465,19 +648,48 @@ class Engine:
         g = rules.get("permissions", {}).get("gatekeeper") or {}
         if not g:
             return await human("no rule covers it")
-        prompt = permissions.gate_prompt(kind, command, paths, title, (self._job or {}).get("request", ""),
-                                         "\n".join(permissions.summary_lines(rules)), self.project_root)
-        try:
-            v = await headless.ask(g.get("agent", "claude"), self.cwd, prompt, permissions.GATE_SCHEMA,
-                                   g.get("model", "sonnet"), g.get("effort", "low"), 120, read_files=False,
-                                   role="gatekeeper")
-        except Exception as e:
-            return await human(f"the gatekeeper couldn't decide ({str(e)[:80]})")
+        # The same action in the same job gets the same answer: ask the gatekeeper once, not every time.
+        seen = (self._job or {}).setdefault("gate", {}) if self._job is not None else {}
+        key = (agent, kind, command or "", tuple(paths), "" if command or paths else title or "")
+        v = seen.get(key)
+        if v is None:
+            prompt = permissions.gate_prompt(kind, command, paths, title, (self._job or {}).get("request", ""),
+                                             "\n".join(permissions.summary_lines(rules)), self.project_root)
+            try:
+                _, _, _, v = await self._ask(g.get("agent", "claude"), g.get("model", "sonnet"),
+                                             g.get("effort", "low"), prompt, permissions.GATE_SCHEMA,
+                                             rules, 120, read_files=False, role="gatekeeper")
+            except Exception as e:
+                return await human(f"the gatekeeper couldn't decide ({str(e)[:80]})")
+            if v.get("decision") in ("allow", "deny"):
+                seen[key] = v
         if v["decision"] == "ask":
             return await human(f"gatekeeper: {v['reason']}")
         mark = "allowed" if v["decision"] == "allow" else "refused"
         await self.ui.say(f"\n_🛡 Gatekeeper {mark}: {agent.title()} wants to {kind} {what[:120]}. {v['reason']}_\n")
         return answer(v["decision"], "gatekeeper", v["reason"]) or await human("the agent offered no way to say yes")
+
+    def _work_clock(self):
+        now = time.monotonic()
+        waiting = now - self._human_since if self._human_since is not None else 0
+        return now - self._human_elapsed - waiting
+
+    async def _wait_working(self, awaitable, budget):
+        """Bound worker time, excluding human waits; always clean up on stop or timeout."""
+        task = asyncio.ensure_future(awaitable)
+        started = self._work_clock()
+        try:
+            while True:
+                remaining = budget - (self._work_clock() - started)
+                if remaining <= 0:
+                    raise asyncio.TimeoutError
+                done, _ = await asyncio.wait({task}, timeout=min(remaining, 0.25))
+                if done:
+                    return task.result()
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     # ---------- usage limits ----------
     def _mark_limited(self, agent, said, resets_at=None):
@@ -506,14 +718,17 @@ class Engine:
 
     async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True, role=None):
         """A read-only call to one agent. If it's at its usage limit, the other agent's strongest checker
-        answers instead. Returns (agent, model, effort, answer). Other errors are raised as they are."""
+        answers instead. `prompt` may be a function of the agent that answers. Returns (agent, model, effort,
+        answer). Other errors are raised as they are."""
         alt = other(agent)
         fb = rules["reviewers"][alt]
         for a, m, e in ((agent, model, effort), (alt, fb["model"], fb["effort"])):
             if self._is_limited(a, rules):
                 continue
             try:
-                return a, m, e, await headless.ask(a, self.cwd, prompt, schema, m, e, timeout, read_files, role=role)
+                m = project_settings.allowed_model(rules, a, m)
+                text = prompt(a) if callable(prompt) else prompt   # built for whoever actually answers
+                return a, m, e, await headless.ask(a, self.cwd, text, schema, m, e, timeout, read_files, role=role)
             except Exception as ex:
                 limit = getattr(ex, "limit", None)
                 if not (limit if limit is not None else error_is_limit(str(ex))):
@@ -538,38 +753,42 @@ class Engine:
         for name, c in self.children.items():
             if c.options.get("model"):
                 models[base(name)] = [m for m in c.options["model"] if m != "default"]
+        for agent, enabled in rules.get("_enabled_models", {}).items():
+            models[agent] = enabled
         files = self._files()
-        prompt = (
-            "You are the lead of Claudex, a coding team of Claude Code and OpenAI Codex. You plan; workers do.\n"
-            "Split the user's message into the FEWEST sequential steps (often one) and give each step to the best "
-            "agent, model and reasoning level. Only one agent works at a time. Split only when parts clearly "
-            "suit different agents (e.g. back end to Codex, then the page to Claude). Order steps so each builds "
-            "on finished work (data, then logic, then screens). When parts connect, write the exact contract "
-            "(endpoint, fields, function names) into BOTH steps' instructions. Each worker tests its own work and "
-            "the other agent reviews it, so don't add separate testing or review steps.\n"
-            "List in big_decisions ONLY choices that are hard to undo: database schema, a new dependency, "
-            "sign-in/permissions, money or VAT logic, a contract between parts, deleting data, architecture. "
-            "Usually there are none. Set browser=true only when the step must use the user's signed-in Chrome.\n"
-            "You may read project files (read-only) to understand the codebase before planning.\n\n"
-            f"USER MESSAGE:\n{text}\n\n"
-            f"PROJECT FILES ({len(files)}):\n" + "\n".join(files[:300]) + "\n\n"
-            f"{self._memory_block()}\n\n"
-            f"ROUTING RULES (prefer these; explain any deviation in 'why'):\n{json.dumps(rules['rule'], indent=1)}\n"
-            f"DEFAULT when no rule clearly fits: {json.dumps(rules['defaults'])}\n"
-            f"MODELS EACH AGENT OFFERS NOW: {json.dumps(models)}\n"
-            f"Only {rules['browser']['signed_in']} can use the user's signed-in browser.\n"
-            + (f"AT THEIR USAGE LIMIT RIGHT NOW (don't give them steps): "
-               f"{', '.join(a for a in self.limited if self._is_limited(a, rules))}\n"
-               if any(self._is_limited(a, rules) for a in self.limited) else "")
-            + (f"THE USER'S OWN NOTES ON WHO DOES WHAT (follow them):\n{rules['_lead_notes']}\n"
-               if rules.get("_lead_notes") else "")
-            + "Write each step's instructions so the worker can act without seeing this message.\n")
-        if critique:
-            prompt += ("\nA SECOND OPINION on your earlier plan raised these concerns. Revise the plan where they "
-                       "are right, and answer EVERY concern in concern_responses (accepted true/false and why):\n"
-                       f"{json.dumps(critique, indent=1)}\n")
-        else:
-            prompt += "\nLeave concern_responses empty.\n"
+        limited = [a for a in self.limited if self._is_limited(a, rules)]
+
+        def prompt(agent):
+            p = (
+                "You are the lead of Claudex, a coding team of Claude Code and OpenAI Codex. You plan; workers do.\n"
+                "Split the user's message into the FEWEST sequential steps (often one) and give each step to the best "
+                "agent, model and reasoning level. Only one agent works at a time. Split only when parts clearly "
+                "suit different agents (e.g. back end to Codex, then the page to Claude). Order steps so each builds "
+                "on finished work (data, then logic, then screens). When parts connect, write the exact contract "
+                "(endpoint, fields, function names) into BOTH steps' instructions. Each worker tests its own work and "
+                "the other agent reviews it, so don't add separate testing or review steps.\n"
+                "List in big_decisions ONLY choices that are hard to undo: database schema, a new dependency, "
+                "sign-in/permissions, money or VAT logic, a contract between parts, deleting data, architecture. "
+                "Usually there are none. Set browser=true only when the step must use the user's signed-in Chrome.\n"
+                "You may read project files (read-only) to understand the codebase before planning.\n\n"
+                f"{self._memory_block(agent=agent)}\n\n"
+                f"ROUTING RULES (prefer these; explain any deviation in 'why'):\n{json.dumps(rules['rule'], indent=1)}\n"
+                f"DEFAULT when no rule clearly fits: {json.dumps(rules['defaults'])}\n"
+                f"MODELS EACH AGENT OFFERS NOW: {json.dumps(models)}\n"
+                f"Only {rules['browser']['signed_in']} can use the user's signed-in browser.\n"
+                + (f"THE USER'S OWN NOTES ON WHO DOES WHAT (follow them):\n{rules['_lead_notes']}\n"
+                   if rules.get("_lead_notes") else "")
+                + f"\nPROJECT FILES ({len(files)}):\n" + "\n".join(files[:300]) + "\n\n"
+                + (f"AT THEIR USAGE LIMIT RIGHT NOW (don't give them steps): {', '.join(limited)}\n" if limited else "")
+                + f"USER MESSAGE:\n{text}\n\n"
+                "Write each step's instructions so the worker can act without seeing this message.\n")
+            if critique:
+                p += ("\nA SECOND OPINION on your earlier plan raised these concerns. Revise the plan where they "
+                      "are right, and answer EVERY concern in concern_responses (accepted true/false and why):\n"
+                      f"{json.dumps(critique, indent=1)}\n")
+            else:
+                p += "\nLeave concern_responses empty.\n"
+            return p
         agent, model, effort = self._lead(rules)
         timeout = rules.get("limits", {}).get("plan_timeout_min", 10) * 60
         a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout, role="lead")
@@ -589,11 +808,13 @@ class Engine:
         planner = self._planned_by or self._lead(rules)[0]
         who = other(planner)
         r = rules["reviewers"][who]
-        prompt = (
-            "You are giving a second opinion on a plan another AI lead wrote, before any work starts. You may "
-            "read the project files (read-only). Judge ONLY the big decisions: are they right for this codebase? "
-            "Agree unless there is a concrete problem; don't nitpick wording or step order.\n\n"
-            f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(plan, indent=1)}\n\n{self._memory_block()}\n")
+        def prompt(agent):
+            return (
+                "You are giving a second opinion on a plan another AI lead wrote, before any work starts. You may "
+                "read the project files (read-only). Judge ONLY the big decisions: are they right for this codebase? "
+                "Agree unless there is a concrete problem; don't nitpick wording or step order.\n\n"
+                f"{self._memory_block(self.CHECK_MEMORY, agent)}\n\n"
+                f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(plan, indent=1)}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         a, m, e, op = await self._ask(who, r["model"], r["effort"], prompt, OPINION_SCHEMA, rules, timeout,
                                       role="second opinion")
@@ -615,8 +836,9 @@ class Engine:
                 await work_lock.acquire(lambda: self.ui.say(
                     "_Another Claudex job is working in this project; waiting for it to finish…_\n\n"))
             now = datetime.datetime.now()
-            self._job = {"at": now.strftime("%Y-%m-%d %H:%M"), "request": text, "rows": [],
-                         "id": now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]}
+            self._job = {"at": now.strftime("%Y-%m-%d %H:%M"), "request": text, "rows": [], "gate": {},
+                         "id": now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6],
+                         "notes_at": self.notes.stat().st_size if self.notes.exists() else 0}
             stop = await self._turn(text, rules)
             self._write_journal("done" if self.ok and stop == "end_turn" else "stopped")
             self._act(None, "done" if self.ok and stop == "end_turn" else "stopped")
@@ -833,20 +1055,32 @@ class Engine:
     def _carry_on(rules):
         return rules.get("checks", {}).get("if_unavailable", "stop") == "continue"
 
-    def _brief(self, i, n, s, text):
+    def _brief(self, i, n, s, text, c=None):
+        memory = self._worker_memory(c) if c is not None else self._memory_block(agent=s["agent"])
+        shapes = ("Do only this step. Check your own work where you can (run the tests). Do not commit unless "
+                  "asked. The other agent will review your changes afterwards.\n"
+                  + QUESTIONS_SHAPE + "\n"
+                  f"If you hit a hard-to-undo decision the plan didn't settle (database schema, new dependency, "
+                  f"sign-in, money logic, deleting data), stop and write a line starting '{DECISION_TAG}' explaining "
+                  "the choice and options, instead of guessing.\n"
+                  + REPLY_SHAPE)
+        digest = hashlib.sha1(shapes.encode()).hexdigest()
+        if c is not None and c.memory_sent.get("shapes") == digest:
+            shapes = ("Do only this step; don't commit unless asked; the other agent reviews it afterwards. "
+                      f"Questions, '{DECISION_TAG}' and the reply shape are as you were told earlier in this "
+                      "conversation.")
+        if c is not None:
+            c.memory_sent["shapes"] = digest
         return (
-            f"You are one worker in Claudex, a team where Claude Code and Codex take turns on a job.\n"
+            f"You are one worker in Claudex, a team where Claude Code and Codex take turns on a job.\n\n"
+            f"{memory}\n\n"
+            f"The user's original message:\n{text}\n\n"
             f"Step {i} of {n}: {s['title']}\n\n{s['instructions']}\n\n"
-            f"The user's original message:\n{text}\n\n{self._memory_block()}\n\n"
-            "Do only this step. Check your own work where you can (run the tests). Do not commit unless asked. "
-            "The other agent will review your changes afterwards.\n"
-            f"If you hit a hard-to-undo decision the plan didn't settle (database schema, new dependency, "
-            f"sign-in, money logic, deleting data), stop and write a line starting '{DECISION_TAG}' explaining "
-            "the choice and options, instead of guessing.\n"
-            + REPLY_SHAPE)
+            + shapes)
 
     async def _configure(self, c, s, rules, model, effort):
         agent = base(c.name)
+        model = project_settings.allowed_model(rules, agent, model)
         if not await c.set("model", model):
             fallback = rules["agent_defaults"][agent]["model"]
             if not await c.set("model", fallback):
@@ -883,7 +1117,8 @@ class Engine:
             if before is None and self.reviews_on:
                 raise StepFailed(f"couldn't take a snapshot of the project files ({gitsnap.LAST_ERROR or 'git failed'}), "
                                  f"so the work couldn't be checked. {SNAP_HELP}")
-            message = self._brief(i, n, s, text)
+            message = self._brief(i, n, s, text, c)
+            asked = []     # what the last review asked for, so the re-check confirms each one
             for attempt in range(1, max_attempts + 1):
                 if self.cancelled:
                     raise StepFailed("cancelled.")
@@ -901,7 +1136,11 @@ class Engine:
                 self._act(agent, "working", model=model, effort=effort)
                 self.active = c
                 try:
-                    stop, out = await asyncio.wait_for(self._prompt_past_refusals(c, agent, message), step_timeout)
+                    stop, out = await self._wait_working(self._prompt_past_refusals(c, agent, message), step_timeout)
+                    needs = getattr(self.ui, "needs_action", None)
+                    if needs:
+                        for item in human_actions(out):
+                            needs(item.strip())
                 except asyncio.TimeoutError:
                     c.cancel()
                     await self._stop_child(name)  # make sure it has really stopped before moving on
@@ -966,7 +1205,7 @@ class Engine:
                     return True
                 tier = self._review_tier(files, review)
                 try:
-                    verdict = await self._review(s, text, out, diff, files, truncated, rules, tier)
+                    verdict = await self._review(s, text, out, diff, files, truncated, rules, tier, asked)
                 except BaseException:
                     self._mark(agent, "unchecked", "the check didn't finish")
                     raise
@@ -984,6 +1223,7 @@ class Engine:
                     if up:
                         model, effort = up
                         await self.ui.say(f"_Stepping up to {model} {effort}._\n\n")
+                asked = list(verdict["issues"])
                 message = ("The reviewer (the other agent) checked your changes and asks for these fixes:\n"
                            + "".join(f"- {x}\n" for x in verdict["issues"])
                            + "\nFix them, re-check your work, and end with the same short handoff.")
@@ -1026,7 +1266,7 @@ class Engine:
                        f"truly can't be done without it, say so and start a line with '{DECISION_TAG}'.")
         return stop, "\n\n".join(x for x in said if x)
 
-    async def _review(self, s, text, out, diff, files, truncated, rules, tier="full"):
+    async def _review(self, s, text, out, diff, files, truncated, rules, tier="full", previous=None):
         who = other(s["agent"])
         r = rules["reviewers"][who]
         light = (rules.get("review", {}).get("light") or {}).get(who) if tier == "light" else None
@@ -1036,17 +1276,24 @@ class Engine:
         self._mark(s["agent"], "checking", f"{who.title()} {r['model']}")
         await self.ui.say(f"_{fun.pick(fun.REVIEWING)}: {who.title()} {r['model']} ({r['effort']})"
                           f"{', a lighter check as only writing changed' if light else ''}…_ ")
-        prompt = (
-            "You are reviewing changes another AI agent just made, as a strict senior engineer. You may read "
-            "project files (read-only). Say 'fix' only for real problems: bugs, missed requirements, broken "
-            "contracts with other parts, security issues, untested risky logic, or claims in the reply or the "
-            "files that aren't true. Don't ask for style changes. Each issue must be concrete and actionable. "
-            "Keep the summary to one or two sentences.\n\n"
-            f"USER MESSAGE:\n{text}\n\nTHE STEP IT WAS GIVEN:\n{s['title']}\n{s['instructions']}\n\n"
-            f"SHARED PROJECT MEMORY (judge against these rules and decisions too):\n{self._memory_block()}\n\n"
-            f"WORKER'S HANDOFF:\n{tail(out, 4000)}\n\n{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n\n"
-            + ("NOTE: the diff below is cut short; read the remaining changed files directly before judging.\n"
-               if truncated else "") + f"DIFF:\n{diff}\n")
+        again = ("THIS IS A RE-CHECK. Last time you asked for these fixes; confirm each one is fixed, and raise "
+                 "new issues only if they are real problems:\n" + "".join(f"- {x}\n" for x in previous) + "\n"
+                 if previous else "")
+
+        def prompt(agent):
+            return (
+                "You are reviewing changes another AI agent just made, as a strict senior engineer. You may read "
+                "project files (read-only). Say 'fix' only for real problems: bugs, missed requirements, broken "
+                "contracts with other parts, security issues, untested risky logic, or claims in the reply or the "
+                "files that aren't true. Don't ask for style changes. Each issue must be concrete and actionable. "
+                "Keep the summary to one or two sentences.\n\n"
+                f"SHARED PROJECT MEMORY (judge against these rules and decisions too):\n"
+                f"{self._memory_block(self.CHECK_MEMORY, agent)}\n\n"
+                f"USER MESSAGE:\n{text}\n\nTHE STEP IT WAS GIVEN:\n{s['title']}\n{s['instructions']}\n\n"
+                + again +
+                f"WORKER'S HANDOFF:\n{tail(out, 4000)}\n\n{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n\n"
+                + ("NOTE: the diff below is cut short; read the remaining changed files directly before judging.\n"
+                   if truncated else "") + f"DIFF:\n{diff}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         try:
             used, m, ef, v = await self._ask(who, r["model"], r["effort"], prompt, REVIEW_SCHEMA, rules, timeout,
@@ -1084,11 +1331,11 @@ class Engine:
             return
         self._act("lead", "thinking")
         await self.ui.say(f"_Final check by the lead ({agent.title()} {model})…_ ")
-        prompt = (
+        prompt = lambda agent: (  # noqa: E731
             "You led this job. All steps are done and each was reviewed. Check that the parts fit together and "
             "the user's request is fully met. You may read project files (read-only).\n\n"
+            f"SHARED PROJECT MEMORY:\n{self._memory_block(self.CHECK_MEMORY, agent)}\n\n"
             f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(steps, indent=1)}\n\n"
-            f"SHARED PROJECT MEMORY:\n{self._memory_block()}\n\n"
             f"{SNAPSHOT_NOTE}\nFILES CHANGED: {', '.join(files)}\n"
             + ("NOTE: the diff is cut short; read the remaining files directly.\n" if truncated else "")
             + f"DIFF:\n{diff}\n")
@@ -1112,16 +1359,21 @@ class Engine:
     async def _update_map(self, text, start, end, rules):
         m = rules.get("memory", {}).get("map_model", {"agent": "codex", "model": "gpt-6.1-sol", "effort": "low"})
         try:
-            files = gitsnap.changed_files(self.project_root, start, end)
+            changes = gitsnap.changed_status(self.project_root, start, end)
         except gitsnap.SnapshotError:
-            files = []
+            changes = []
+        files = [f for _, f in changes]
+        if (rules.get("memory", {}).get("map_when", "structural") == "structural" and self.map.exists()
+                and changes and not map_worthy(changes)):
+            return   # only edits inside existing files: the layout the map describes hasn't changed
         prompt = (
             "Update the project map: a short guide (under 150 lines, markdown) for AI agents to this codebase: "
             "layout, key files and what they do, data/database, how it runs, tests and deploys. Keep what is "
             "still true, add what this job changed, remove what is no longer true. You may read files.\n\n"
             f"CURRENT MAP:\n{self._read(self.map, 20000)}\n\nTHIS JOB: {text[:2000]}\n"
-            f"FILES CHANGED: {', '.join(files)}\n\n"
-            f"SHARED PROJECT MEMORY (keep anything here that future agents need in the map):\n{self._memory_block()}\n")
+            f"FILES CHANGED: {', '.join(f'{st} {f}' for st, f in changes) or ', '.join(files)}\n"
+            "(A = added, D = deleted, R = renamed, M = changed.)\n\n"
+            f"WHAT THE WORKERS SAID THEY DID (keep anything future agents need in the map):\n{self._job_so_far()}\n")
         try:
             v = (await self._ask(m["agent"], m["model"], m["effort"], prompt, MAP_SCHEMA, rules, 600, role="map"))[3]
         except Exception as e:

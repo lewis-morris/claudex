@@ -20,9 +20,11 @@ LADDER = engine.load_rules()["ladder"]
 
 @pytest.fixture(autouse=True)
 def _private_usage_ledger(tmp_path, monkeypatch):
-    """Tests never write to the real usage history."""
+    """Tests never write to the real usage history, or add their throwaway folders to the real project list."""
     from claudex import usage
     monkeypatch.setattr(usage, "LEDGER", tmp_path / "usage.jsonl")
+    monkeypatch.setattr(usage, "DATA", tmp_path / "claudex-data")
+    monkeypatch.setattr(usage, "PROJECTS", tmp_path / "claudex-data" / "projects.json")
 
 
 # ---------- ladder ----------
@@ -610,15 +612,24 @@ def test_everyone_shares_one_memory(job):
     e = engine.Engine(str(repo), UI(), settings={}, session_key="B")
     asyncio.run(e.turn("second job"))
 
-    must_see = ["whole pence", "pytest -q", "first job", "Earlier job"]       # both rule files + session A's work
-    prompts = {kind: [c[4] for c in calls if c[0] == kind] for kind in ("plan", "opinion", "review", "final")}
-    briefs = [w.prompts[0] for w in FakeChild.started]
+    # Every prompt carries the house rules the agent doesn't load by itself (Claude reads CLAUDE.md, Codex
+    # reads AGENTS.md), and names the one it does instead of pasting it again.
+    own = {"claude": ("whole pence", "pytest -q"), "codex": ("pytest -q", "whole pence")}
+    prompts = {kind: [(c[1], c[4]) for c in calls if c[0] == kind] for kind in ("plan", "opinion", "review", "final")}
+    briefs = [(engine.base(w.name), w.prompts[0]) for w in FakeChild.started]
     for who, texts in [("lead", prompts["plan"]), ("second opinion", prompts["opinion"]),
                        ("reviewers", prompts["review"]), ("final check", prompts["final"]), ("workers", briefs)]:
         assert texts, who
-        for t in texts:
-            for needle in must_see:
-                assert needle in t, f"{who} can't see {needle!r}"
+        for agent, t in texts:
+            loads_itself, pasted = own[agent]
+            assert pasted in t and loads_itself not in t and "loads it itself" in t, (who, agent)
+    # Session A's work reaches the planner and the workers; checks of a diff don't carry old jobs.
+    for agent, t in prompts["plan"] + briefs:
+        assert "first job" in t and "Earlier job" in t
+    for agent, t in prompts["opinion"] + prompts["review"] + prompts["final"]:
+        assert "Earlier job" not in t
+    prompts = {k: [t for _, t in v] for k, v in prompts.items()}
+    briefs = [t for _, t in briefs]
     # Big decisions reach everyone after they're made; the second worker sees the first one's handover.
     for t in briefs + prompts["review"] + prompts["final"]:
         assert "VAT on the subtotal" in t
@@ -669,7 +680,7 @@ def test_tui_draws_every_state_layout_and_colour(tmp_path):
                     assert len(lines) == h and all(sum(len(x) for _, x in ln) == w for ln in lines)
     for layout in T.LAYOUTS:
         t.prefs["layout"] = layout
-        t.app.layout.container.content.get_children()  # builds without error
+        assert list(t.app.layout.find_all_windows())  # resolves every dynamic layout without error
 
 
 def _live_job(t):
@@ -760,7 +771,7 @@ def test_crash_still_writes_the_journal(job, monkeypatch):
     assert "failed" in j and "made a change" in j
 
 
-def test_map_writer_gets_the_shared_memory(job):
+def test_map_writer_gets_the_job_not_the_whole_memory(job):
     repo, calls, answers = job
     (repo / "CLAUDE.md").write_text("Rule for everyone.\n")
     answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
@@ -768,7 +779,8 @@ def test_map_writer_gets_the_shared_memory(job):
     FakeChild.script = [("a.py", "v\n", "HANDOVER-XYZ")]
     run(repo)
     m = [c[4] for c in calls if c[0] == "map"][0]
-    assert "Rule for everyone." in m and "HANDOVER-XYZ" in m
+    assert "HANDOVER-XYZ" in m and "M a.py" in m
+    assert "Rule for everyone." not in m and "RECENT JOBS" not in m and m.count("CURRENT MAP") == 1
 
 
 def test_screen_memory_is_bounded(tmp_path):
@@ -1714,7 +1726,7 @@ def test_writing_only_changes_get_the_lighter_check():
 
 def test_workers_are_asked_for_one_reply_shape():
     from claudex.engine import REPLY_SHAPE
-    for part in ("**Done:**", "**Changed:**", "**Checked:**", "**Not checked:**", "**Needs you:**"):
+    for part in ("**Done:**", "**Changed:**", "**Checked:**", "**Not checked:**", "Questions for you"):
         assert part in REPLY_SHAPE
 
 
@@ -1729,7 +1741,7 @@ def test_a_no_from_claudex_is_not_a_stop(job):
         await c.decide(_req("execute", "python3 -m venv .venv"))
         return "cancelled", "I'll make a virtualenv."
     FakeChild.script = [asks_then_cancelled, ("a.py", "x\n", "Done without it.")]
-    e, ui, stop = run(repo)
+    e, ui, stop = run(repo, mode="auto")
     w = FakeChild.started[0]
     assert e.ok and stop == "end_turn" and "Stopped" not in ui.all()
     assert "Claudex said no to" in w.prompts[1] and "not needed for this step" in w.prompts[1]
@@ -1754,3 +1766,733 @@ def test_installs_into_the_project_go_ahead_computer_installs_ask(tmp_path):
     set_project_permission(root, "installs", "ask")
     r = engine.load_rules(project_root=root)
     assert d(".venv/bin/pip install numpy") == "ask"
+
+
+def test_gatekeeper_limit_uses_other_agent_and_remembers(job):
+    repo, calls, answers = job
+    e = engine.Engine(str(repo), UI(), settings={"mode": "auto"}, session_key="t")
+    e._rules = engine.load_rules()
+    e.notes_dir.mkdir(parents=True, exist_ok=True)
+    answers["gate"] = [headless.HeadlessError("usage limit", limit=True),
+                       {"decision": "allow", "reason": "local editing"},
+                       {"decision": "allow", "reason": "local tests"}]
+    async def go():
+        for _ in range(2):
+            result = await e.decide_permission("codex", _req("execute", "python3 build.py"))
+            assert result["outcome"]["optionId"] == "y"
+    asyncio.run(go())
+    assert [c[1] for c in calls if c[0] == "gate"] == ["claude", "codex", "codex"]
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("/usr/bin/zsh -lc 'git status --short'", "allow"),
+    ("/usr/bin/zsh -lc '.venv/bin/pip install pytest'", "allow"),
+    ("/usr/bin/zsh -lc 'git push origin main'", "ask"),
+    ("/usr/bin/zsh -lc 'git push --force'", "deny"),
+    ("/usr/bin/zsh -lc 'ls; python3 unknown.py'", None),
+    ("/usr/bin/zsh -lc 'ls' && python3 unknown.py", None),
+    ("/tmp/zsh -lc 'git status'", None),
+])
+def test_shell_wrapped_permission_rules(command, expected, tmp_path):
+    k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": command}}, str(tmp_path))
+    assert perms.rule_decision(engine.load_rules(), k, c, p, str(tmp_path))[0] == expected
+
+
+def test_work_timeout_excludes_human_wait_and_still_stops_work(job):
+    repo, _, _ = job
+    e = engine.Engine(str(repo), UI(), settings={"mode": "ask"}, session_key="t")
+    async def human(params):
+        await asyncio.sleep(.08)
+        return {"outcome": {"outcome": "selected", "optionId": "y"}}
+    e.ui.permission = human
+    async def go():
+        result = await e._wait_working(e.decide_permission("codex", _req("execute", "test")), .03)
+        assert result["outcome"]["optionId"] == "y"
+        assert e._human_waits == 0 and e._human_since is None
+        with pytest.raises(asyncio.TimeoutError):
+            await e._wait_working(asyncio.sleep(1), .01)
+        pending = asyncio.create_task(e._wait_working(e.decide_permission("codex", _req("execute", "test")), 1))
+        await asyncio.sleep(.01)
+        pending.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await pending
+        assert e._human_waits == 0 and e._human_since is None
+    asyncio.run(go())
+
+
+def test_needs_panel_clicks_answers_and_ticks_tasks(tmp_path):
+    from types import SimpleNamespace
+    from prompt_toolkit.mouse_events import MouseEventType
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    click = SimpleNamespace(event_type=MouseEventType.MOUSE_UP)
+    async def go():
+        _live_job(t)
+        opts = [{"optionId": "y", "name": "Yes", "kind": "allow_once"}]
+        q = asyncio.create_task(t.permission({"toolCall": {"title": "first"}, "options": opts}))
+        await asyncio.sleep(0)
+        t.on_accept(SimpleNamespace(text="/todo Check the printout"))
+        handlers = [f[2] for f in t.needs_text() if len(f) == 3]
+        handlers[1](click)
+        assert t.todos[0]["done"] and not q.done()
+        handlers[0](click)
+        assert (await q)["outcome"]["optionId"] == "y"
+        q2 = asyncio.create_task(t.permission({"toolCall": {"title": "second"}, "options": opts}))
+        await asyncio.sleep(0)
+        handlers[0](click)  # stale click must never answer a different question
+        assert not q2.done()
+        t.drop_questions()
+        assert (await q2)["outcome"]["outcome"] == "cancelled"
+        assert "cancelled" in "".join(f[1] for f in t.transcript())
+        t.on_accept(SimpleNamespace(text="/done 1"))
+        assert not t.todos[0]["done"]
+    asyncio.run(go())
+
+
+def test_unrestricted_default_and_explicit_modes(tmp_path):
+    from claudex.__main__ import chat_parser, settings_from
+    parser = chat_parser()
+    assert settings_from(parser.parse_args([]))["mode"] is None  # project setting resolved by Engine
+    assert engine.Engine(str(tmp_path), UI()).mode == "unrestricted"
+    for mode in ("auto", "ask", "unrestricted"):
+        settings = settings_from(parser.parse_args(["--mode", mode]))
+        assert engine.Engine(str(tmp_path), UI(), settings=settings).mode == mode
+
+
+def test_unrestricted_connector_requests_never_ask_human_or_gatekeeper(job):
+    repo, calls, answers = job
+    e = engine.Engine(str(repo), UI(), settings={"mode": "unrestricted"}, session_key="t")
+    async def human(params):
+        pytest.fail("unrestricted mode must not prompt")
+    e.ui.permission = human
+    async def go():
+        for request in (_req("execute", "git push origin main"),
+                        _req("other", "browser_file_upload")):
+            result = await e.decide_permission("claude", request)
+            assert result["outcome"]["optionId"] == "y"
+        no_allow = {"toolCall": {"kind": "other"}, "options": [{"optionId": "n", "kind": "reject_once"}]}
+        assert (await e.decide_permission("claude", no_allow))["outcome"]["outcome"] == "cancelled"
+    asyncio.run(go())
+    assert not calls
+    assert '"by": "unrestricted"' in (repo / ".claudex/permissions.jsonl").read_text()
+
+
+def test_project_mode_persists_with_explicit_override_and_isolation(tmp_path):
+    from claudex import project_settings as ps
+    from claudex.__main__ import chat_parser, settings_from
+    _, t, e = _tui(tmp_path)
+    t.build()
+    asyncio.run(t.command('/mode'))
+    assert t.picker is not None
+    t._pick(next(i for i, (_, value) in enumerate(t.picker['items']) if value == 'auto'))
+    settings = settings_from(chat_parser().parse_args([]))
+    assert engine.Engine(str(tmp_path), UI(), settings=settings).mode == 'auto'
+    assert engine.Engine(str(tmp_path), UI(), settings={'mode': 'ask'}).mode == 'ask'
+    assert engine.Engine(str(tmp_path / 'elsewhere'), UI()).mode == 'unrestricted'
+    assert ps.load(tmp_path)['mode'] == 'auto'
+
+
+def test_onboarding_save_cancel_and_existing_instructions(tmp_path):
+    from claudex import project_settings as ps
+    _, t, e = _tui(tmp_path)
+    t.build()
+    t.open_setup()
+    assert t.setup_dialog is not None
+    t.setup_form.description.text = 'Do not save this'
+    t.close_setup()
+    assert ps.load(tmp_path) == {}
+    (tmp_path / 'AGENTS.md').write_text('Existing rules\n')
+    t.open_setup()
+    form = t.setup_form
+    form.description.text = 'A handwriting app'
+    form.prompt.text = 'Always keep the original photographs.'
+    t.pending_mode = 'ask'
+    form.mode.current_value = 'auto'
+    form.instructions.checked = True
+    form.show(1)
+    form.show(2)
+    form.save()
+    assert t.setup_dialog is None and t.pending_mode is None
+    assert ps.load(tmp_path)['onboarded'] is True
+    assert (tmp_path / 'AGENTS.md').read_text() == 'Existing rules\n'
+    assert (tmp_path / 'CLAUDE.md').read_text() == '@AGENTS.md\n'
+    new = engine.Engine(str(tmp_path), UI())
+    assert new.mode == 'auto'
+    assert 'Always keep the original photographs.' in new._instructions()
+    assert 'A handwriting app' in new._instructions()
+    t.open_setup()
+    assert t.setup_form.prompt.text == form.prompt.text
+    t.close_setup()
+
+
+def test_model_choices_enforced_for_worker_and_headless(job):
+    from claudex import project_settings as ps
+    repo, calls, answers = job
+    ps.save(repo, {'enabled_models': {'claude': ['sonnet'], 'codex': ['gpt-6.1-sol']}})
+    e = engine.Engine(str(repo), UI())
+    r = engine.load_rules(project_root=repo)
+    assert r['lead']['model'] == 'sonnet'
+    assert r['reviewers']['codex']['model'] == 'gpt-6.1-sol'
+    answers['gate'] = {'decision': 'allow', 'reason': 'fine'}
+    async def go():
+        await e._ask('claude', 'opus', 'high', 'test', perms.GATE_SCHEMA, r, 10, role='gatekeeper')
+        class Worker:
+            name = 'codex'
+            options = {'model': ['gpt-6.1-sol'], 'mode': ['agent-full-access']}
+            async def set(self, key, value):
+                if key == 'model':
+                    assert value == 'gpt-6.1-sol'
+                return True
+        assert await e._configure(Worker(), step(), r, 'gpt-6-astra', 'medium') == 'gpt-6.1-sol'
+    asyncio.run(go())
+    assert calls[-1][2] == 'sonnet'
+    assert 'opus' in ps.model_choices(engine.load_rules(project_root=repo, model_preferences=False), {})['claude']
+
+
+def test_setup_requires_models_and_skip_is_remembered(tmp_path):
+    from claudex import project_settings as ps
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    t.open_setup()
+    form = t.setup_form
+    form.models.current_values = []
+    form.save()
+    assert t.setup_dialog is not None and 'at least one' in form.error.text
+    assert not ps.path(tmp_path).exists()
+    form.skip()
+    assert ps.load(tmp_path)['onboarded'] and t.setup_dialog is None
+
+
+def test_non_utf8_patch_is_reviewable_without_changing_source(tmp_path):
+    from claudex import gitsnap
+    source = tmp_path / 'legacy.txt'
+    source.write_bytes(b'original\n')
+    before = gitsnap.snapshot(str(tmp_path))
+    raw = b'Windows quote: \x93hello\x94\n'
+    source.write_bytes(raw)
+    after = gitsnap.snapshot(str(tmp_path))
+    diff, files, truncated = gitsnap.diff(str(tmp_path), before, after)
+    assert 'legacy.txt' in files and not truncated
+    assert r'\x93hello\x94' in diff
+    assert source.read_bytes() == raw
+
+
+@pytest.mark.parametrize('text, expected', [
+    ('**Needs you:** Run the server.\nThen open the page.\n\nDone.', ['Run the server. Then open the page.']),
+    ('NEEDS YOU: Check a printout.\n', ['Check a printout.']),
+    ('Needs you: none.\n', []),
+    ('```\nNEEDS YOU: an example\n```', []),
+])
+def test_human_action_markdown(text, expected):
+    assert engine.human_actions(text) == expected
+
+
+STRUCTURED = """Done the thing.
+
+## Questions for you
+Reply like: 1A, 2B, 3 skip, 5: <your words>
+
+### Security
+**Q1. Rotate the database password**
+Change the production database password now?
+Why: it appeared in a session transcript.
+A) Yes, tonight (recommended): quick and low risk
+B) Later
+If you don't answer: waits.
+
+### Natter
+**Q2. Which customer owns these? (still open)**
+Confirm each best guess.
+| Item | Best guess | Confirm Y/N or name |
+|---|---|---|
+| friee | 8hours | |
+If you don't answer: they stay unmapped.
+
+## Things only you can do
+1. Plug in the backup key and register it in Settings.
+
+```
+**Q9. Example in a code block**
+```
+"""
+
+
+def test_human_actions_structured_questions():
+    assert engine.human_actions(STRUCTURED) == [
+        'Q1. Rotate the database password: Change the production database password now?',
+        'Q2. Which customer owns these? (still open): Confirm each best guess.',
+        'Plug in the backup key and register it in Settings.']
+
+
+def test_brief_asks_for_structured_questions():
+    assert "Questions for you" in engine.QUESTIONS_SHAPE and "(recommended)" in engine.QUESTIONS_SHAPE
+    assert "Needs you:" not in engine.REPLY_SHAPE
+
+
+def test_selection_default_and_clickable_links(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from prompt_toolkit.mouse_events import MouseEventType
+    import webbrowser
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    assert not t.app.mouse_support()
+    t._add('claude', 'Open [the page](http://127.0.0.1:5055).')
+    assert t.conversation_links() == ['http://127.0.0.1:5055']
+    opened = []
+    monkeypatch.setattr(webbrowser, 'open', lambda url: opened.append(url) or True)
+    t.toggle_mouse()
+    assert t.app.mouse_support()
+    fragments = [f for f in t.clickable_transcript() if len(f) == 3]
+    fragments[0][2](SimpleNamespace(event_type=MouseEventType.MOUSE_UP))
+    assert opened == ['http://127.0.0.1:5055']
+    t.toggle_mouse()
+    assert not t.app.mouse_support()
+    t.links_menu()
+    t._pick(0)
+    assert len(opened) == 2
+
+
+def test_mode_picker_during_approval_saves_next_job_without_answering(tmp_path):
+    from types import SimpleNamespace
+    from claudex import project_settings as ps
+    _, t, e = _tui(tmp_path)
+    t.build()
+    e.mode = 'auto'
+    async def go():
+        _live_job(t)
+        pending = asyncio.create_task(t.permission({'toolCall': {'title': 'upload'},
+                    'options': [{'optionId': 'y', 'kind': 'allow_once', 'name': 'Yes'}]}))
+        await asyncio.sleep(0)
+        t.on_accept(SimpleNamespace(text='mode'))
+        assert t.picker
+        t._pick(0)
+        assert not pending.done() and e.mode == 'auto'
+        assert t.pending_mode == 'unrestricted'
+        assert ps.load(tmp_path)['mode'] == 'unrestricted'
+        t.drop_questions()
+        await pending
+    asyncio.run(go())
+
+
+def test_attachment_paths_and_safe_copies(tmp_path):
+    from claudex import attachments as a
+    source = tmp_path / 'photo with spaces.png'
+    raw = b'\x89PNG\r\n\x1a\noriginal'
+    source.write_bytes(raw)
+    assert a.paths_in(source.as_uri(), tmp_path, only=True) == [source]
+    assert a.paths_in("'" + str(source) + "'", tmp_path, only=True) == [source]
+    assert a.paths_in('copy\n' + source.as_uri(), tmp_path, only=True) == [source]
+    assert a.paths_in('a' * 10000, tmp_path) == []
+    assert a.paths_in('file://remote-host/private.png', tmp_path) == []
+    item = a.store_file(source, tmp_path)
+    source.write_bytes(b'changed later')
+    assert pathlib.Path(item['path']).read_bytes() == raw
+    assert 'image-viewing tool' in a.prompt([item])
+    assert item['path'] in a.prompt([item])
+
+
+def test_paste_files_and_multiline_stays_a_draft(tmp_path):
+    from types import SimpleNamespace
+    _, t, e = _tui(tmp_path)
+    t.build()
+    source = tmp_path / 'screenshot.png'
+    source.write_bytes(b'png')
+    t.paste_text(source.as_uri())
+    assert len(t.attachments) == 1 and t.input.text == '' and t.busy is None
+    t.paste_text('First line\r\nSecond line\nThird line')
+    assert t.input.text == 'First line\nSecond line\nThird line'
+    assert t.input_height() >= 3 and t.busy is None
+    sent = []
+    async def capture(text):
+        sent.append(text)
+    t.run = capture
+    async def go():
+        assert t.on_accept(SimpleNamespace(text=t.input.text)) is False
+        await t.busy
+    asyncio.run(go())
+    assert len(sent) == 1 and 'First line\nSecond line' in sent[0]
+    assert 'screenshot.png' in sent[0] and 'ATTACHED LOCAL FILES' in sent[0]
+    assert not t.attachments
+
+
+def test_dropped_path_is_not_a_slash_command_and_busy_draft_survives(tmp_path):
+    from types import SimpleNamespace
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    source = tmp_path / 'photo.png'
+    source.write_bytes(b'png')
+    sent = []
+    async def capture(text):
+        sent.append(text)
+    t.run = capture
+    async def go():
+        t.on_accept(SimpleNamespace(text=str(source)))
+        await t.busy
+        assert t.cmd_task is None
+        _live_job(t)
+        assert t.on_accept(SimpleNamespace(text='Keep this\nmultiline draft')) is True
+    asyncio.run(go())
+    assert sent and 'Please inspect the attached files.' in sent[0]
+
+
+def test_clipboard_images_files_text_and_failure(tmp_path, monkeypatch):
+    from claudex import attachments as a
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    async def go():
+        async def image_clipboard():
+            return 'image/png', b'\x89PNG\r\n\x1a\nimage'
+        monkeypatch.setattr(a, 'clipboard', image_clipboard)
+        await t.paste_clipboard()
+        assert len(t.attachments) == 1
+        assert pathlib.Path(t.attachments[0]['path']).read_bytes().startswith(b'\x89PNG')
+        async def text_clipboard():
+            return 'text/plain', b'hello\nworld'
+        monkeypatch.setattr(a, 'clipboard', text_clipboard)
+        await t.paste_clipboard()
+        assert t.input.text == 'hello\nworld'
+        async def unavailable():
+            raise ValueError('Clipboard unavailable')
+        monkeypatch.setattr(a, 'clipboard', unavailable)
+        await t.paste_clipboard()
+        assert 'Clipboard unavailable' in ''.join(f[1] for f in t.transcript())
+        assert t.input.text == 'hello\nworld' and len(t.attachments) == 1
+    asyncio.run(go())
+
+
+def test_wayland_clipboard_chooses_files_before_image(tmp_path, monkeypatch):
+    from claudex import attachments as a
+    calls = []
+    monkeypatch.setenv('WAYLAND_DISPLAY', 'wayland-test')
+    monkeypatch.setattr(a.shutil, 'which', lambda name: '/bin/' + name)
+    async def capture(cmd, limit=a.MAX_BYTES):
+        calls.append(cmd)
+        return b'image/png\ntext/uri-list\n' if '--list-types' in cmd else b'file:///tmp/test.png'
+    monkeypatch.setattr(a, '_capture', capture)
+    assert asyncio.run(a.clipboard()) == ('text/uri-list', b'file:///tmp/test.png')
+    assert calls[-1][-1] == 'text/uri-list'
+
+
+def test_attachment_limits_and_detach(tmp_path, monkeypatch):
+    from claudex import attachments as a
+    from types import SimpleNamespace
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    source = tmp_path / 'data.txt'
+    source.write_bytes(b'12345')
+    monkeypatch.setattr(a, 'MAX_BYTES', 4)
+    assert not t.attach_paths([source]) and not t.attachments
+    monkeypatch.setattr(a, 'MAX_BYTES', 20)
+    assert t.attach_paths([source])
+    assert t.attach_paths([source]) and len(t.attachments) == 1
+    t.on_accept(SimpleNamespace(text='/detach 1'))
+    assert not t.attachments and source.read_bytes() == b'12345'
+
+
+def test_clipboard_capture_is_binary_safe_and_bounded():
+    from claudex import attachments as a
+    import sys
+    async def go():
+        command = [sys.executable, '-c', "import sys; sys.stdout.buffer.write(bytes([0, 147, 255, 10]))"]
+        assert await a._capture(command) == bytes([0, 147, 255, 10])
+        with pytest.raises(ValueError, match='larger'):
+            await a._capture(command, limit=3)
+    asyncio.run(go())
+
+
+def test_multiline_paste_starting_with_command_is_a_message(tmp_path):
+    from types import SimpleNamespace
+    _, t, e = _tui(tmp_path)
+    t.build()
+    sent = []
+    async def capture(text):
+        sent.append(text)
+    t.run = capture
+    async def go():
+        text = '/mode auto\nExplain what this does.'
+        t.on_accept(SimpleNamespace(text=text))
+        await t.busy
+        assert sent == [text] and e.mode == 'unrestricted'
+    asyncio.run(go())
+
+
+def test_multiline_draft_is_kept_during_approval(tmp_path):
+    from types import SimpleNamespace
+    _, t, _ = _tui(tmp_path)
+    t.build()
+    async def go():
+        _live_job(t)
+        question = asyncio.create_task(t.permission({'toolCall': {'title': 'upload'},
+            'options': [{'optionId': 'y', 'kind': 'allow_once', 'name': 'Yes'}]}))
+        await asyncio.sleep(0)
+        assert t.on_accept(SimpleNamespace(text='My next question\nhas two lines')) is True
+        assert not question.done()
+        assert t.on_accept(SimpleNamespace(text='y')) is False
+        await question
+    asyncio.run(go())
+
+
+def test_copy_view_freezes_stream_and_restores_draft(tmp_path):
+    from types import SimpleNamespace
+    _, t, e = _tui(tmp_path)
+    t.build()
+    t._add('claude', 'Run `python app.py` to start.\n')
+    t.input.text = 'my unfinished draft'
+    t.prefs['mouse'] = True
+    t.toggle_copy_view()
+    snapshot = t.copy_view.text
+    assert 'python app.py' in snapshot and t.copy_mode
+    assert not t.app.mouse_support()
+    invalidated = []
+    t.app.invalidate = lambda: invalidated.append(True)
+    t._add('claude', 'More output while copying.\n')
+    t.activity('claude', 'working')
+    t._refresh()
+    assert t.copy_view.text == snapshot and not invalidated
+    assert 'More output' in ''.join(f[1] for f in t.transcript())
+    ctrl_c = next(b.handler for b in t.app.key_bindings.bindings
+                  if [getattr(k, 'value', k) for k in b.keys] == ['c-c'])
+    ctrl_c(SimpleNamespace(app=t.app))
+    assert t.copy_mode and not e.cancelled and t.input.text == 'my unfinished draft'
+    t.toggle_copy_view()
+    assert not t.copy_mode and t.app.mouse_support()
+    assert t.input.text == 'my unfinished draft' and invalidated
+    assert t.app.layout.has_focus(t.input)
+
+
+def test_copy_view_streaming_does_not_render_again(tmp_path):
+    from prompt_toolkit.application import create_app_session
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.data_structures import Size
+    class Output(DummyOutput):
+        def get_size(self):
+            return Size(rows=30, columns=100)
+    async def go():
+        with create_pipe_input() as pipe, create_app_session(input=pipe, output=Output()):
+            _, t, _ = _tui(tmp_path)
+            t.speaker = 'claude'
+            t._add('claude', 'A command to copy: python app.py\n')
+            app = t.build()
+            renders = []
+            app.after_render += lambda app: renders.append(True)
+            running = asyncio.create_task(app.run_async())
+            ticker = asyncio.create_task(t.animate())
+            try:
+                await asyncio.sleep(.05)
+                pipe.send_text('\x1b[19~')  # F8
+                await asyncio.sleep(.1)
+                assert t.copy_mode
+                snapshot, before = t.copy_view.text, len(renders)
+                for i in range(6):
+                    await t.update({'sessionUpdate': 'agent_message_chunk',
+                                    'content': {'type': 'text', 'text': f'New chunk {i}\n'}})
+                    await asyncio.sleep(.06)
+                assert t.copy_view.text == snapshot
+                assert len(renders) == before  # neither streaming nor animation repaints native selection
+                assert 'New chunk 5' in ''.join(f[1] for f in t.transcript())
+                pipe.send_text('\x1b[19~')
+                await asyncio.sleep(.1)
+                assert not t.copy_mode and app.layout.has_focus(t.input)
+                assert len(renders) > before
+                pipe.send_text('\x1b[19~')
+                await asyncio.sleep(.1)
+                assert 'New chunk 5' in t.copy_view.text  # reopening takes a fresh snapshot
+            finally:
+                ticker.cancel()
+                await asyncio.gather(ticker, return_exceptions=True)
+                app.exit()
+                await running
+    asyncio.run(go())
+
+
+# ---------- leaner prompts, same accuracy ----------
+def _three_codex_steps():
+    return {"steps": [step(title="One"), step(title="Two"), step(title="Three")], "big_decisions": [],
+            "concern_responses": []}
+
+
+def test_worker_isnt_sent_unchanged_memory_twice(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("House rule: whole pence.\n")
+    answers["plan"] = {"steps": [step(title="One"), step(title="Two")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "FIRST-REPLY-MARK"), ("b.py", "2\n", "second")]
+    run(repo)
+    w = FakeChild.started[0]
+    first, second = w.prompts[0], w.prompts[1]
+    assert "whole pence" in first and "**Done:**" in first
+    assert "whole pence" not in second and "**Done:**" not in second            # already in this conversation
+    assert "PROJECT INSTRUCTIONS (CLAUDE.md and AGENTS.md; follow both): unchanged" in second
+    assert second.count("FIRST-REPLY-MARK") == 1                                 # this job's work, once
+    assert "Step 2 of 2: Two" in second
+
+
+def test_squashed_worker_gets_everything_again(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("House rule: whole pence.\n")
+    answers["plan"] = _three_codex_steps()
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+
+    def work(fname, squash):
+        async def go(c):
+            pathlib.Path(c.cwd, fname).write_text("x\n")
+            c.usage = {"used": 1000}
+            c.squashed = squash or getattr(c, "squashed", False)
+            return "end_turn", f"made {fname}"
+        return go
+    FakeChild.script = [work("a.py", False), work("b.py", True), ("c.py", "3\n", "made c.py")]
+    run(repo)
+    p = FakeChild.started[0].prompts
+    assert "whole pence" in p[0] and "whole pence" not in p[1]
+    assert "whole pence" in p[2] and "**Done:**" in p[2]          # its context was squashed: everything again
+
+
+def test_a_worker_that_never_reports_its_context_gets_memory_each_job(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("House rule: whole pence.\n")
+    answers["plan"] = {"steps": [step(title="One"), step(title="Two")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "one"), ("b.py", "2\n", "two"), ("c.py", "3\n", "three"),
+                        ("d.py", "4\n", "four")]
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    asyncio.run(e.turn("first"))
+    asyncio.run(e.turn("second"))
+    p = FakeChild.started[0].prompts
+    assert ["whole pence" in x for x in p] == [True, False, True, False]   # can't see squashes: once per job
+
+
+def test_child_notices_its_context_shrinking_mid_turn():
+    from claudex.child import Child
+    c = Child("codex", ["x"], ".", UI())
+
+    async def go():
+        for used in (50000, 180000, 60000):
+            await c._on_notify("session/update", {"update": {"sessionUpdate": "usage_update", "used": used}})
+    asyncio.run(go())
+    assert c.squashed and c.usage["used"] == 60000
+
+
+def test_codex_is_sent_an_agents_md_too_long_for_it_to_read_whole(job):
+    repo, calls, answers = job
+    (repo / "AGENTS.md").write_text("OPENING RULE.\n" + "filler line\n" * 4000)   # about 48 KB
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    e._rules = engine.load_rules()
+    assert "OPENING RULE." in e._instructions("codex")                  # past Codex's own cut-off: pasted
+    (repo / "AGENTS.md").write_text("OPENING RULE.\n")
+    assert "OPENING RULE." not in e._instructions("codex") and "loads it itself" in e._instructions("codex")
+
+def test_map_is_left_alone_when_only_existing_files_changed(job):
+    repo, calls, answers = job
+    (repo / ".claudex/project").mkdir(parents=True)
+    (repo / ".claudex/project/map.md").write_text("# Map\n")
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": ""}
+    FakeChild.script = [("a.py", "x = 9\n", "edited a.py")]
+    run(repo)
+    assert not any(c[0] == "map" for c in calls)
+    calls.clear()
+    FakeChild.script = [("new_module.py", "y = 1\n", "added a module")]
+    run(repo)
+    assert any(c[0] == "map" for c in calls)
+
+
+def test_map_worthy_changes():
+    assert engine.map_worthy([("A", "src/x.py")]) and engine.map_worthy([("M", "package.json")])
+    assert engine.map_worthy([("M", ".github/workflows/ci.yml")])
+    assert not engine.map_worthy([("M", "src/x.py"), ("M", "web/page.html")])
+
+
+def test_diff_keeps_whole_files_and_leaves_out_lockfiles(repo):
+    a = gitsnap.snapshot(str(repo))
+    (repo / "package-lock.json").write_text('{"lock": 1}\n' * 2000)
+    (repo / "small.py").write_text("def ok(): return 1\n")
+    (repo / "big.py").write_text("line = 1\n" * 2000)
+    text, files, cut = gitsnap.diff(str(repo), a, gitsnap.snapshot(str(repo)), limit=3000)
+    assert set(files) == {"package-lock.json", "small.py", "big.py"} and cut
+    assert "def ok(): return 1" in text                                   # a whole file that fits
+    assert '"lock": 1' not in text and "lockfile or generated" in text and "package-lock.json" in text
+    assert "read these files directly: big.py" in text and "line = 1" not in text
+    b = gitsnap.snapshot(str(repo))
+    (repo / "package-lock.json").write_text('{"lock": 2}\n')
+    (repo / "small.py").write_text("def ok(): return 2\n")
+    text, _, cut = gitsnap.diff(str(repo), b, gitsnap.snapshot(str(repo)))
+    assert not cut and "return 2" in text and '"lock": 2' not in text  # a lockfile alone isn't "cut short"
+
+
+def test_tail_starts_at_a_whole_entry():
+    text = "## old\n" + "a" * 100 + "\n## middle job\nsome words here\n## newest\nlast words\n"
+    kept = engine.tail(text, 60)
+    assert kept.split("\n", 1)[1].startswith("## ") and "last words" in kept
+    assert engine.tail("short", 60) == "short"
+    words = engine.tail("one two three\nfour five six\nseven eight nine\n", 25)
+    assert words.split("\n", 1)[1] in ("four five six\nseven eight nine\n", "seven eight nine\n")
+
+
+def test_recheck_lists_what_the_reviewer_asked_for(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = [{"verdict": "fix", "issues": ["totals ignore VAT"], "summary": "no"},
+                         {"verdict": "pass", "issues": [], "summary": "ok"}]
+    FakeChild.script = [("a.py", "v1\n", "try1"), ("a.py", "v2\n", "try2")]
+    run(repo)
+    first, second = [c[4] for c in calls if c[0] == "review"]
+    assert "RE-CHECK" not in first
+    assert "THIS IS A RE-CHECK" in second and "- totals ignore VAT" in second
+
+
+def test_gatekeeper_is_asked_once_per_action_in_a_job(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["gate"] = {"decision": "allow", "reason": "fine"}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+
+    async def asks_twice(c):
+        for _ in range(3):
+            await c.decide(_req("execute", "python3 -m venv .venv"))
+        pathlib.Path(c.cwd, "a.py").write_text("z\n")
+        return "end_turn", "done"
+    FakeChild.script = [asks_twice]
+    e, ui, stop = run(repo, mode="auto")
+    assert e.ok and [c[0] for c in calls].count("gate") == 1
+
+
+def test_tool_less_claude_calls_skip_the_long_system_prompt():
+    lean = headless.claude_cmd("sonnet", "low", {}, "")
+    assert lean[lean.index("--system-prompt") + 1] == headless.LEAN_SYSTEM
+    assert "--system-prompt" not in headless.claude_cmd("sonnet", "low", {}, "Read,Grep,Glob")
+
+
+def test_a_fallback_answer_gets_a_prompt_built_for_it(job):
+    repo, calls, answers = job
+    (repo / "CLAUDE.md").write_text("CLAUDE-ONLY-RULE\n")
+    (repo / "AGENTS.md").write_text("CODEX-ONLY-RULE\n")
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    e._rules = rules = engine.load_rules()
+    e._prepare_memory()
+    e._mark_limited("claude", "usage limit")
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    used = asyncio.run(e._ask("claude", "opus", "high", lambda a: e._memory_block(agent=a),
+                              engine.REVIEW_SCHEMA, rules, 60))[0]
+    sent = [c for c in calls if c[0] == "review"][-1]
+    assert used == "codex" == sent[1] and "CLAUDE-ONLY-RULE" in sent[4] and "CODEX-ONLY-RULE" not in sent[4]
+
+
+def test_project_list_drops_only_temp_folders_that_are_gone(tmp_path):
+    from claudex import usage
+    gone, here = tmp_path / "gone", tmp_path / "here"      # pytest's folders live under the temp folder
+    unmounted = "/mnt/not-plugged-in/Projects/invoicer"   # a real project on a drive that's away right now
+    here.mkdir()
+    usage.PROJECTS.parent.mkdir(parents=True, exist_ok=True)
+    usage.PROJECTS.write_text(json.dumps([str(gone), unmounted]))
+    usage.remember_project(here)
+    assert json.loads(usage.PROJECTS.read_text()) == sorted([str(here), unmounted])
+
+
+def test_diff_spots_a_lockfile_with_an_awkward_name(repo):
+    a = gitsnap.snapshot(str(repo))
+    (repo / "web app").mkdir()
+    (repo / "web app" / "package-lock.json").write_text('{"lock": 1}\n' * 50)
+    (repo / "naïve.py").write_text("ok = 1\n")
+    text, files, cut = gitsnap.diff(str(repo), a, gitsnap.snapshot(str(repo)), limit=100000)
+    assert '"lock": 1' not in text and "ok = 1" in text and not cut

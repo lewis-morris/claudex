@@ -171,6 +171,9 @@ async def handle_command(line, eng, skills):
         print(f"{DIM}The monkeys live in the full screen: run claudex without --plain.{RESET}")
     elif cmd in ARG_CHOICES:
         if arg in ARG_CHOICES[cmd]:
+            if cmd == "mode":
+                from .project_settings import save
+                save(eng.project_root, {"mode": arg})
             setattr(eng, cmd, arg)
         else:
             print(f"{DIM}Choose one of: {' '.join(ARG_CHOICES[cmd])}{RESET}")

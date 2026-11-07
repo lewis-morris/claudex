@@ -28,17 +28,17 @@ def chat_parser():
     ap.add_argument("--acp", action="store_true", help="speak ACP on stdin/stdout (for Agents of Empires)")
     ap.add_argument("-p", "--print", metavar="MESSAGE", help="run one message and exit")
     ap.add_argument("--cwd", default=".", help="project folder (default: here)")
-    ap.add_argument("--route", default="auto", choices=["auto", "claude", "codex"],
+    ap.add_argument("--route", default=None, choices=["auto", "claude", "codex"],
                     help="who does the work: auto (Claudex decides), or one agent for everything")
-    ap.add_argument("--mode", default="auto",
+    ap.add_argument("--mode", default=None,
                     choices=["ask", "auto", "unrestricted", "default", "acceptEdits", "bypassPermissions"],
                     help="ask: you approve everything · auto: Claudex's rules + a gatekeeper decide, you get "
-                         "the hard calls (default) · unrestricted: nothing asks (old names still work)")
+                         "the hard calls · unrestricted: nothing asks (default; old names still work)")
     ap.add_argument("--unattended", action="store_true",
                     help="nobody's watching: anything that would ask you is refused instead")
     ap.add_argument("--effort", default="auto", choices=["auto", "low", "medium", "high", "xhigh"],
                     help="force one reasoning level for every step (default: per step)")
-    ap.add_argument("--checks", default="full", choices=["full", "reviews", "off"],
+    ap.add_argument("--checks", default=None, choices=["full", "reviews", "off"],
                     help="full: second opinions + reviews; reviews: reviews only; off: no checks")
     ap.add_argument("--no-review", action="store_true", help="same as --checks off")
     ap.add_argument("--no-second-opinion", action="store_true", help="same as --checks reviews")
@@ -58,7 +58,7 @@ def chat_parser():
 
 def settings_from(args):
     checks = args.checks
-    if args.no_second_opinion and checks == "full":
+    if args.no_second_opinion and checks in (None, "full"):
         checks = "reviews"
     if args.no_review:
         checks = "off"

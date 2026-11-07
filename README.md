@@ -40,8 +40,10 @@ need both, and the best results come when someone *else* checks the work. Claude
   with the fixed version below. Plain answers that change no files aren't checked, and a step that only
   changed writing (.md, .txt) gets a lighter, cheaper check (`[review] light` in the rules). Every worker
   ends with the same short shape: Done, Changed, Checked, Not checked, Needs you.
-- **One shared memory.** Everyone (lead, workers, reviewers) sees the same project map, past decisions,
-  a journal of every job from every session, each worker's handover, and *both* `CLAUDE.md` and `AGENTS.md`.
+- **One shared memory, sent sparingly.** Everyone works from the same project map, past decisions, each
+  worker's handover and *both* `CLAUDE.md` and `AGENTS.md`; the lead and workers also get the journal of every
+  job from every session. Each role gets only the part it needs, and a worker is never sent again what it
+  already has in its conversation.
 - **Its own permission rules, with a gatekeeper.** Workers ask before acting; Claudex answers from one set
   of rules for both agents, a quick gatekeeper model handles the grey areas, and only the hard calls reach you.
   Or go **unrestricted** and nothing asks at all.
@@ -114,13 +116,79 @@ to just one of them.
 | **Ctrl-C** | clear what you typed, or stop the current job; press it twice to quit |
 | **Ctrl-D** or `/quit` | leave |
 
+## First-open project setup
+
+The full-screen terminal opens a setup dialog the first time you enter a project. Use Tab to move,
+Space to tick choices, and Next/Back to change pages. You can set the project brief, a base prompt
+included in every job, permissions, who does the work, review settings, and the models allowed for
+each agent. Keep at least one model for each agent: the other agent may still plan or review.
+Model choices come from local configuration and are checked for availability when used.
+
+Optionally create missing `AGENTS.md` and `CLAUDE.md` instruction files. Existing files are never
+replaced. Save remembers the choices in `.claudex/settings.json` at the repository root (or the
+current folder when there is no repository). **Later** closes without saving; **Skip setup** remembers
+that you skipped it. `/setup` reopens the dialog. Resuming a conversation does not interrupt you with setup.
+
+Type `mode` or `/mode` to open the permission picker. Arrows and Enter, or a mouse click, choose
+and save the mode for this project. `/mode auto` still works. Explicit `--mode`, `--route` and
+`--checks` flags override the saved choices for that launch.
+
+## Multiline messages and attachments
+
+The input box grows from two rows to fit your draft, up to ten rows (less in a small terminal), then
+scrolls. **Enter sends**; **Alt+Enter** or **Ctrl+J** inserts a new line. Pasted multiline text stays
+in the draft until you send it. Sending while a job is busy keeps your draft instead of clearing it.
+
+- Drop files into terminals that support file-path drops, or paste copied file paths/`file://` links.
+- Use `/attach "/path/to/my photo.png"` to add a file explicitly; relative paths also work.
+- **F7** or **Ctrl+V** reads an image, copied files, or text from the desktop clipboard. Normal terminal
+  paste (often Ctrl+Shift+V) still works for text and file paths.
+- The line above the input lists attachments. `/detach 1` removes the first from the draft.
+- Press Enter with only attachments to ask the agents to inspect them, or type your question first.
+
+Attachments are local copies under `.claudex/attachments`, with a limit of 10 files per message and
+20 MB per file. They remain there for retries and conversation history; removing one from the draft
+only removes its selection. Originals are not changed. The job includes their paths and asks the
+agents to open them (using an image-viewing tool for pictures); this is not an inline image preview.
+
+Clipboard image/file paste uses `wl-paste` on Wayland or `xclip` on X11. If unavailable, `/attach` and
+text/file-path paste still work. Desktop drag-and-drop depends on the terminal passing local paths;
+a terminal cannot receive arbitrary desktop drag data directly.
+
+## Selecting text and opening links
+
+For reliable copying while output is streaming, press **F8** (or type `/copy`). This opens a frozen,
+full-width transcript: drag to select and use your terminal's copy shortcut (often Ctrl+Shift+C).
+PgUp/PgDn scroll it; **F8** or **Escape** returns to the live conversation. Agents keep running,
+incoming output is retained, and your draft stays intact. The frozen view does not repaint for new
+tokens or animations, so they cannot clear the terminal's selection. Ctrl+C in this view does not stop
+the job. Close open menus or setup dialogs before entering copy view.
+
+Native selection is also available in the live view, but ongoing redraws may clear it.
+**F6** or `/mouse` switches between native selection and clickable controls;
+the preference is remembered. Dialogs and menus temporarily enable mouse controls while open.
+With mouse controls enabled, click a web address to open it. `/links` offers the same links in a
+keyboard-accessible picker. PgUp/PgDn scroll the conversation in either mode.
+
+## Your checklist
+
+The terminal's left-hand **Needs you** panel keeps pending approvals visible. Press F6 to click an answer,
+or use Y/N, arrow keys and Enter. The step's working-time limit pauses while you answer.
+Cancelled requests are marked cancelled, rather than appearing answered.
+
+Workers ask questions in a structured `Questions for you` section (numbered `Q1.` items with lettered options, one marked recommended) and list manual tasks under `Things only you can do`; the older `NEEDS YOU: …` line still works. Either way they appear here from their completed
+reply. Add your own with `/todo Check the printed page`; click its checkbox or type `/done 1`
+to tick or untick it, including while a worker is busy. These checklist items last for this open
+screen only. Ticking one records completion; send any answer in the conversation when the worker
+finishes. A checkbox never approves a command or automatically resumes a stopped job.
+
 ## Permissions: ask, auto, or unrestricted
 
 | Mode | What happens |
 |---|---|
 | `ask` | every request comes to you |
-| `auto` (default) | Claudex's rules decide: **deny** rules first, then **ask** (you), then **allow**. Anything not covered goes to the **gatekeeper** (Claude Sonnet, low effort), which allows, denies, or passes it to you. Nobody watching (scripts, the benchmark)? "Ask you" becomes "no" |
-| `unrestricted` | the workers run in their most permissive modes and never ask. A red **UNRESTRICTED** warning sits in the status bar. Use it on throwaway branches or machines |
+| `auto` | Claudex's rules decide: **deny** rules first, then **ask** (you), then **allow**. Anything not covered goes to the **gatekeeper** (Claude Sonnet, low effort), which allows, denies, or passes it to you. Nobody watching (scripts, the benchmark)? "Ask you" becomes "no" |
+| `unrestricted` (default) | the workers run in their most permissive modes and never ask. A red **UNRESTRICTED** warning sits in the status bar. Use it on throwaway branches or machines |
 
 The default rules let workers read anything, edit inside the project, and run tests, builds, linters and
 `git status/diff/log`. They ask you about `git push`, deploys, installs, `ssh`, deleting folders and the
@@ -128,6 +196,8 @@ internet, and refuse `sudo`, your `~/.ssh` and other secrets, force-pushes, `cur
 the project. A chained command (`ls && curl …`) never sneaks through on an allow rule: the gatekeeper looks at
 it, and neither does anything with a variable or wildcard in it (`$HOME`, `*`). Every decision is logged with
 who made it: `claudex permissions` shows the rules and the last 30.
+Simple commands wrapped by Codex in `zsh -lc` use the same rules as bare commands. If the gatekeeper
+hits its usage limit, the other agent takes over; if neither can decide, Claudex still asks you.
 
 **What it is and isn't.** In `auto`, everything the agents *ask* about goes through these rules. Each agent
 still has a few things it does without asking (both read files; Claude also follows any allow-list in your own
@@ -215,7 +285,7 @@ claudex bench [--tasks … --arms … --runs N --no-judge]      race Claude, Cod
 claudex demo                 a pretend job, to preview the look
 
   --route auto|claude|codex           who does the work (default auto)
-  --mode ask|auto|unrestricted        who approves what workers do (default auto)
+  --mode ask|auto|unrestricted        who approves what workers do (default unrestricted)
   --unattended                        nobody's watching: anything that would ask you is refused
   --effort auto|low|medium|high|xhigh force one reasoning level for every step
   --checks full|reviews|off           second opinions + reviews / reviews only / none
@@ -279,7 +349,7 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 
 | File | What |
 |---|---|
-| `project/map.md` | how the project is laid out, refreshed after each completed job that changed files |
+| `project/map.md` | how the project is laid out, refreshed after a job that added, deleted or renamed files or changed how the project is built or run (`[memory] map_when`) |
 | `project/decisions.md` | big decisions, second opinions, and the lead's answer to each concern |
 | `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
 | `sessions/<id>/notes.md` | this session's requests, handovers and reviews (long handovers saved whole) |
@@ -287,8 +357,23 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 | `permissions.jsonl` | every permission decision: what, who decided (rule, gatekeeper, you), why |
 | `rules.toml` | this project's own rules, layered over yours (made by `claudex init`) |
 
-Every role gets the same memory, plus your project's `CLAUDE.md` **and** `AGENTS.md` (in full; a file over
-40,000 characters comes with an instruction to read the rest), so both agents follow one set of house rules. A test (`test_everyone_shares_one_memory`) proves it across two sessions.
+Every role works under both house-rule files: your project's `CLAUDE.md` **and** `AGENTS.md` (in full; a file
+over 40,000 characters comes with an instruction to read the rest). Claude Code loads `CLAUDE.md` itself and
+Codex loads `AGENTS.md`, so each is sent only the other's file (`[memory] native_instructions = false` pastes
+both). What else each role gets:
+
+| Role | Memory it gets |
+|---|---|
+| Lead, workers | rules, map, decisions, recent jobs, this session's earlier notes, this job so far |
+| Second opinion, reviewers, final check | rules, map, decisions, this job so far |
+| Map writer | the current map, this job's handovers and which files were added, changed or deleted |
+
+A worker keeps one conversation across steps and jobs, so a part it has already been sent unchanged is named
+rather than pasted again; if its conversation is new or has been squashed, it gets everything again. A
+re-check lists what the reviewer asked for last time. Diffs for review keep each file's patch whole: lockfiles
+and generated files appear in the summary only, and a file that doesn't fit is named for the reviewer to read.
+The gatekeeper answers each action once per job. A test (`test_everyone_shares_one_memory`) proves it across
+two sessions.
 
 ## Browser
 

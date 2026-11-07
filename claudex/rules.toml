@@ -32,6 +32,10 @@ enabled = true            # after a job with more than one step, the lead checks
 
 [memory]
 update_map = true         # refresh .claudex/project/map.md after a job that changed files
+map_when = "structural"   # "structural": only when files were added, deleted or renamed, or build/run/deploy
+                          # files changed (edits inside existing files don't change the layout); "always"
+native_instructions = true  # Claude loads CLAUDE.md and Codex loads AGENTS.md themselves, so each is sent only
+                            # the other's file; false pastes both into every prompt
 map_model = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
 
 [limits]

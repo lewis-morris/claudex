@@ -50,11 +50,18 @@ def _first_json(text):
     return obj
 
 
+# A call with no tools (the gatekeeper, `doctor --live`) only reads the prompt and answers in JSON, so it doesn't
+# need Claude Code's own long system prompt, which is most of what such a call costs.
+LEAN_SYSTEM = ("You answer the user's message directly, in the JSON shape you are given. Be brief and exact. "
+               "You have no tools; judge only from the message.")
+
+
 def claude_cmd(model, effort, schema, tools="", budget=3.0):
     return ["claude", "-p", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--setting-sources", "project", "--settings", '{"disableAllHooks": true}',
             "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "dontAsk",
-            "--tools", tools, *(["--allowedTools", tools] if tools else []), "--model", model, "--effort", effort, "--max-budget-usd", str(budget),
+            "--tools", tools, *(["--allowedTools", tools] if tools else ["--system-prompt", LEAN_SYSTEM]),
+            "--model", model, "--effort", effort, "--max-budget-usd", str(budget),
             "--output-format", "json", "--json-schema", json.dumps(schema)]
 
 

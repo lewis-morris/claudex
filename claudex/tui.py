@@ -14,17 +14,21 @@ import subprocess
 import time
 
 from prompt_toolkit.application import Application
+from prompt_toolkit.document import Document
 from prompt_toolkit.data_structures import Point
+from prompt_toolkit.mouse_events import MouseEventType
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import (ConditionalContainer, DynamicContainer, Float, FloatContainer, HSplit, Layout,
                                    VSplit, Window)
 from prompt_toolkit.layout.controls import FormattedTextControl, UIContent, UIControl
 from prompt_toolkit.layout.menus import CompletionsMenu
-from prompt_toolkit.filters import Condition
+from prompt_toolkit.filters import Condition, has_focus
+from prompt_toolkit.utils import get_cwidth
 from prompt_toolkit.styles import DynamicStyle, Style
 from prompt_toolkit.widgets import Frame, TextArea
 
-from . import fun
+from . import fun, project_settings, attachments
 from .cli import ARG_CHOICES, make_completer
 from .commands import COMMANDS, expand_skill, load_skills
 from .engine import CHECKS, MODES, ROUTES
@@ -357,7 +361,12 @@ class TUI:
         self.state = {"who": None, "state": "idle", "target": None, "since": time.time()}
         self.banana = None          # (from, to, started)
         self.confetti = []
+        self.copy_mode = False
+        self.copy_view = None
         self.scroll_back = 0
+        self.attachments = []
+        self.clipboard_task = None
+        self.todos = []             # personal checklist for this open screen
         self.questions = []         # permission questions waiting for an answer, oldest first: (future, options)
         self.tools = {}             # tool call id -> what it was doing, for its ✓/✗
         self.detailed = set()       # tool calls whose details have been shown
@@ -365,6 +374,9 @@ class TUI:
         self.cmd_task = None        # a running /doctor, /rules or /log
         self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
         self.quit_armed = 0.0       # when Ctrl-C last asked "again to quit?"
+        self.setup_dialog = None
+        self.setup_form = None
+        self.pending_mode = None
         self.picker = None          # an open arrow-key list (e.g. /resume)
         self.speaker_how = {}       # agent -> "model · reasoning" it's working on now
         self.q_index = 0            # highlighted option in the waiting permission question
@@ -384,6 +396,7 @@ class TUI:
         style = p.get("style") if p.get("style") in STYLES else ("off" if p.get("animate") is False else "playful")
         return {"style": style, "size": p.get("size") if p.get("size") in SIZES else "big",
                 "layout": p.get("layout", "wide"),
+                "mouse": bool(p.get("mouse", False)),
                 "palette": p.get("palette", "Jungle") if p.get("palette") in PALETTES else "Jungle"}
 
     def _save_prefs(self):
@@ -488,7 +501,15 @@ class TUI:
         try:
             return await fut
         finally:
+            for block in self.blocks:
+                if block.get("qid") == id(fut) and block.get("answer") == "waiting":
+                    block["answer"] = "cancelled"
+            was_first = bool(self.questions) and self.questions[0][0] is fut
             self.questions = [q for q in self.questions if q[0] is not fut]
+            self.version += 1
+            if was_first:
+                self._show_question()
+            self._refresh()
 
     def _show_question(self):
         if not self.questions:
@@ -498,6 +519,7 @@ class TUI:
         who = self.NAMES.get(self.speaker, "An agent")
         self.q_index = 0                       # the highlighted option (arrow keys move it)
         self.blocks.append({"who": "ask", "qid": id(self.questions[0][0]), "text": f"{who} {q['what']}", "code": q["code"],
+                            "answer": "waiting",
                             "options": [f"[{keys.get(o.get('optionId'), str(n)).upper()}] {o.get('name')}"
                                         for n, o in enumerate(opts, 1)]})
         self.blocks.append({"who": "sys", "text": ""})
@@ -530,21 +552,30 @@ class TUI:
             pick = next((o for o in opts if keys.get(o.get("optionId")) == alias), None)
         if pick is None:
             self._add("sys", "\n_Press " + ", ".join(k.upper() for k in keys.values()) + "._\n")
-            return
+            return False
         self.questions.pop(0)
+        for block in self.blocks:
+            if block.get("qid") == id(fut):
+                block["answer"] = pick.get("name", "answered")
         if not fut.done():
             fut.set_result({"outcome": {"outcome": "selected", "optionId": pick["optionId"]}})
         self.q_index = 0
         self.version += 1
         self._add("sys", f"\n_You chose “{pick.get('name')}” for: {title[:100]}_\n")
         self._show_question()
+        return True
 
     def drop_questions(self):
         """Answer every waiting question with "cancelled" (the job stopped, finished or we're leaving)."""
         qs, self.questions = self.questions, []
         for fut, _, _ in qs:
+            for block in self.blocks:
+                if block.get("qid") == id(fut):
+                    block["answer"] = "cancelled"
             if not fut.done():
                 fut.set_result({"outcome": {"outcome": "cancelled"}})
+        self.version += 1
+        self._refresh()
 
     def _doing(self, what):
         self.live["now"] = what
@@ -585,7 +616,7 @@ class TUI:
                           random.uniform(-1.6, -0.6), random.choice(cols)] for _ in range(110)]
 
     def _refresh(self):
-        if self.app:
+        if self.app and not self.copy_mode:
             self.app.invalidate()
 
     # ---------- the stage ----------
@@ -865,7 +896,7 @@ class TUI:
                 for n, o in enumerate(b.get("options") or []):
                     on = live and n == self.q_index
                     frags.append(("class:pick.on" if on else "class:ask", f"  {'❯' if on else ' '} {o}  \n"))
-                frags.append(("class:dim", "  ↑ ↓ and Enter, or press the letter." if live else "  (answered)"))
+                frags.append(("class:dim", "  ↑ ↓ and Enter, or press the letter." if live else f"  ({b.get('answer', 'cancelled')})"))
                 frags.append(("", "\n\n"))
                 continue
             elif who != "sys":
@@ -888,6 +919,53 @@ class TUI:
     def cursor(self):
         lines = sum(t.count("\n") for _, t in self.transcript())
         return Point(0, max(0, lines - self.scroll_back))
+
+    def needs_action(self, text):
+        if text and not any(t["text"] == text and not t["done"] for t in self.todos):
+            self.todos.append({"text": text, "done": False})
+            self._refresh()
+
+    def needs_text(self):
+        out = []
+        if self.questions:
+            fut, opts, q = self.questions[0]
+            out.append(("class:ask bold", f"Waiting for you ({len(self.questions)})\n"))
+            out.append(("class:body", q["short"][:180] + "\n\n"))
+            keys = self._keys(opts)
+            for i, option in enumerate(opts):
+                def click(event, number=i + 1, question=fut):
+                    if event.event_type == MouseEventType.MOUSE_UP:
+                        if self.questions and self.questions[0][0] is question:
+                            self._answer(str(number))
+                            self._refresh()
+                out.append(("class:pick.on" if i == self.q_index else "class:ask",
+                            f"[{keys[option.get('optionId')].upper()}] {option.get('name')}\n", click))
+            out.append(("class:dim", "\nWork timer paused.\n\n"))
+        else:
+            out.append(("class:dim", "No answers waiting.\n\n"))
+        for i, todo in enumerate(self.todos):
+            def tick(event, item=todo):
+                if event.event_type == MouseEventType.MOUSE_UP:
+                    item["done"] = not item["done"]
+                    self._refresh()
+            out.append(("class:good" if todo["done"] else "class:body",
+                        f"[{'x' if todo['done'] else ' '}] {i + 1}. {todo['text']}\n", tick))
+        out.append(("class:dim", "\n/todo text adds a task\n/done 1 ticks or unticks\nF6 mouse clicks · F8 select/copy."))
+        return out
+
+    def checklist_command(self, line):
+        cmd, _, arg = line.partition(" ")
+        if cmd not in ("/todo", "/done"):
+            return False
+        if cmd == "/todo" and arg.strip():
+            self.needs_action(arg.strip())
+        elif cmd == "/done" and arg.strip().isdigit() and 1 <= int(arg) <= len(self.todos):
+            todo = self.todos[int(arg) - 1]
+            todo["done"] = not todo["done"]
+        else:
+            self._add("sys", "\n_Use /todo followed by a task, or /done followed by its number._\n")
+        self._refresh()
+        return True
 
     def plan_text(self):
         if not self.steps:
@@ -930,39 +1008,49 @@ class TUI:
             left = " Ready "
         right = (f" {ROUTES[e.route]} · effort {e.effort} · checks {CHECKS[e.checks]}"
                  + (" · PLAN ONLY" if e.dry_run else "")
-                 + " · /settings · F2 animation ")
+                 + " · /settings · F2 animation · F6 " + ("mouse controls" if self.prefs["mouse"] else "text selection") + " ")
         warn = [("class:danger", " UNRESTRICTED: nothing asks ")] if e.mode == "unrestricted" else []
+        if self.questions:
+            right = " · F6 " + ("mouse controls" if self.prefs["mouse"] else "text selection")
         return [("class:chip", left)] + warn + [("class:status", right)]
 
     # ---------- layout ----------
     def build(self):
-        self.input = TextArea(height=1, prompt=[("class:accent bold", "› ")], multiline=False,
+        self.input = TextArea(height=self.input_height, prompt=[("class:accent bold", "› ")], multiline=True,
+                              wrap_lines=True, scrollbar=True,
                               completer=self._completer, complete_while_typing=True,
                               accept_handler=self.on_accept, style="class:input")
         self.stage = Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], style="class:bg")
-        self.chat = Window(FormattedTextControl(self.transcript, get_cursor_position=self.cursor, show_cursor=False),
+        self.chat = Window(FormattedTextControl(self.clickable_transcript, get_cursor_position=self.cursor, show_cursor=False),
                            wrap_lines=True, style="class:panel")
         self.plan_win = Window(FormattedTextControl(self.plan_text), wrap_lines=True, style="class:panel")
+
+        self.needs_win = Window(FormattedTextControl(self.needs_text), wrap_lines=True,
+                                style="class:panel")
 
         def body():
             lay = self.prefs["layout"]
             chat = Frame(self.chat, title="Conversation", style="class:frame")
             plan = Frame(self.plan_win, title="Plan", style="class:frame", width=44)
+            needs = Frame(self.needs_win, title="Needs you", style="class:frame",
+                          height=lambda: min(20, 9 + len(self.todos) + (6 if self.questions else 0)))
+            sidebar = HSplit([needs, plan], width=46)
             if lay == "side":
                 return VSplit([HSplit([Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], width=44,
-                                             style="class:bg"), plan],
+                                             style="class:bg"), sidebar],
                                       width=46), chat])
             if lay == "focus":
-                return chat
-            return HSplit([self.stage, VSplit([chat, plan])])
+                return VSplit([sidebar, chat]) if self.questions or self.todos else chat
+            return HSplit([self.stage, VSplit([sidebar, chat])])
 
         root = HSplit([
             Window(FormattedTextControl(self.header), height=1, style="class:bg"),
             DynamicContainer(body),
+            Window(FormattedTextControl(self.input_hint), height=1, style="class:bg"),
             Frame(self.input, style="class:frame"),
             Window(FormattedTextControl(self.status), height=1, style="class:status"),
         ], style="class:bg")
-        picking = Condition(lambda: self.picker is not None)
+        picking = Condition(lambda: not self.copy_mode and self.picker is not None)
         picker_box = ConditionalContainer(
             Frame(Window(FormattedTextControl(self.picker_text), style="class:panel", wrap_lines=False,
                          height=lambda: min(12, len(self.picker["items"])) if self.picker else 1),
@@ -970,8 +1058,55 @@ class TUI:
             filter=picking)
         root = FloatContainer(root, floats=[Float(xcursor=True, ycursor=True,
                                                   content=CompletionsMenu(max_height=14, scroll_offset=1)),
-                                            Float(content=picker_box, top=3, left=4, right=4)])
+                                            Float(content=picker_box, top=3, left=4, right=4),
+                                            Float(content=ConditionalContainer(
+                                                DynamicContainer(lambda: self.setup_dialog or Window()),
+                                                filter=Condition(lambda: self.setup_dialog is not None)))])
+        live_root = root
+        self.copy_view = TextArea(read_only=True, wrap_lines=True, scrollbar=True, style="class:panel")
+        copy_root = HSplit([
+            Window(FormattedTextControl(" COPY VIEW — frozen; agents keep working"), height=1, style="class:chip"),
+            self.copy_view,
+            Window(FormattedTextControl(" Drag to select · Ctrl+Shift+C copies · PgUp/PgDn scroll · F8/Esc returns"),
+                   height=1, style="class:status"),
+        ])
+        root = DynamicContainer(lambda: copy_root if self.copy_mode else live_root)
         kb = KeyBindings()
+        copying = Condition(lambda: self.copy_mode)
+
+        @kb.add("f8", eager=True)
+        def _(event):
+            self.toggle_copy_view()
+
+        @kb.add("escape", filter=copying, eager=True)
+        def _(event):
+            self.toggle_copy_view()
+
+        composing = has_focus(self.input) & Condition(lambda: not self.copy_mode and self.setup_dialog is None and self.picker is None)
+
+        @kb.add("enter", filter=composing & Condition(lambda: bool(self.input.text) or not self.questions), eager=True)
+        def _(event):
+            self.input.buffer.validate_and_handle()
+
+        @kb.add("escape", "enter", filter=composing, eager=True)
+        @kb.add("c-j", filter=composing, eager=True)
+        def _(event):
+            self.input.buffer.insert_text("\n")
+
+        @kb.add(Keys.BracketedPaste, filter=composing, eager=True)
+        def _(event):
+            self.paste_text(event.data)
+
+        @kb.add("c-v", filter=composing, eager=True)
+        @kb.add("f7", filter=composing, eager=True)
+        def _(event):
+            if not self.clipboard_task or self.clipboard_task.done():
+                self.clipboard_task = asyncio.create_task(self.paste_clipboard())
+
+
+        @kb.add("escape", filter=Condition(lambda: self.setup_dialog is not None), eager=True)
+        def _(event):
+            self.close_setup()
 
         @kb.add("up", filter=picking, eager=True)
         def _(event):
@@ -994,7 +1129,7 @@ class TUI:
             def _(event, digit=digit):
                 self._pick(int(digit) - 1)
 
-        typing_command = Condition(lambda: self.input.text[:1] in ("/", "$", "@") and " " not in self.input.text)
+        typing_command = Condition(lambda: not self.copy_mode and self.setup_dialog is None and self.input.text[:1] in ("/", "$", "@") and " " not in self.input.text)
 
         @kb.add("tab", filter=typing_command, eager=True)
         def _(event):                      # Tab fills in the highlighted (or first) match
@@ -1010,6 +1145,11 @@ class TUI:
         def _(event):
             # Like Claude Code: Ctrl-C clears what you typed or stops the job; with nothing to clear or stop,
             # it asks once, and a second Ctrl-C within two seconds quits.
+            if self.copy_mode:
+                return  # copying must never interrupt the worker or discard its draft
+            if self.setup_dialog is not None:
+                self.close_setup()
+                return
             now = time.time()
             if now - self.quit_armed < 2:
                 event.app.exit()
@@ -1029,7 +1169,7 @@ class TUI:
                 self.quit_armed = now
             self._refresh()
 
-        waiting = Condition(lambda: bool(self.questions) and not self.input.text)
+        waiting = Condition(lambda: not self.copy_mode and bool(self.questions) and not self.input.text and self.setup_dialog is None)
 
         @kb.add("up", filter=waiting & ~picking, eager=True)
         def _(event):
@@ -1057,18 +1197,25 @@ class TUI:
 
         @kb.add("c-d")
         def _(event):
-            event.app.exit()
+            if self.copy_mode:
+                self.toggle_copy_view()
+            else:
+                event.app.exit()
 
-        @kb.add("f2")
+        @kb.add("f2", filter=~copying)
         def _(event):
             self.animation_menu()
 
-        @kb.add("f3")
+        @kb.add("f6", filter=~copying)
+        def _(event):
+            self.toggle_mouse()
+
+        @kb.add("f3", filter=~copying)
         def _(event):
             self.prefs["layout"] = LAYOUTS[(LAYOUTS.index(self.prefs["layout"]) + 1) % len(LAYOUTS)]
             self._save_prefs()
 
-        @kb.add("f4")
+        @kb.add("f4", filter=~copying)
         def _(event):
             names = list(PALETTES)
             self.prefs["palette"] = names[(names.index(self.prefs["palette"]) + 1) % len(names)]
@@ -1076,17 +1223,23 @@ class TUI:
 
         @kb.add("pageup")
         def _(event):
-            self.scroll_back += 12
+            if self.copy_mode:
+                self.copy_view.buffer.cursor_up(count=12)
+            else:
+                self.scroll_back += 12
 
         @kb.add("pagedown")
         def _(event):
-            self.scroll_back = max(0, self.scroll_back - 12)
+            if self.copy_mode:
+                self.copy_view.buffer.cursor_down(count=12)
+            else:
+                self.scroll_back = max(0, self.scroll_back - 12)
 
         from prompt_toolkit.output import ColorDepth
         depth = ColorDepth.TRUE_COLOR if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") \
             or os.environ.get("CLAUDEX_TRUECOLOR") else None
         self.app = Application(layout=Layout(root, focused_element=self.input), key_bindings=kb, full_screen=True,
-                               style=DynamicStyle(self.style), mouse_support=False, color_depth=depth)
+                               style=DynamicStyle(self.style), mouse_support=Condition(lambda: not self.copy_mode and (self.prefs["mouse"] or self.setup_dialog is not None or self.picker is not None)), color_depth=depth)
         return self.app
 
     def style(self):
@@ -1106,17 +1259,109 @@ class TUI:
             "completion-menu.meta.completion.current": f"bg:{p['accent']} {p['bg']}",
         })
 
+    def input_height(self):
+        try:
+            size = self.app.output.get_size()
+            width, maximum = max(10, size.columns - 6), max(2, min(10, size.rows // 3))
+        except Exception:
+            width, maximum = 80, 8
+        text = self.input.text if hasattr(self, "input") else ""
+        rows = sum(max(1, (get_cwidth(line) + width - 1) // width) for line in text.split("\n"))
+        return min(maximum, max(2, rows))
+
+    def input_hint(self):
+        hint = " F8 select/copy · Enter sends · Alt+Enter/Ctrl+J new line · F7 paste image/files · /attach path"
+        if self.attachments:
+            hint = " Attached: " + ", ".join(f"{i}. {item['name']}" for i, item in enumerate(self.attachments, 1)) + " · /detach number"
+        return [("class:accent" if self.attachments else "class:dim", hint)]
+
+    def attach_paths(self, paths):
+        for path in paths:
+            if any(item.get("source") == str(path.resolve()) for item in self.attachments):
+                continue
+            try:
+                if len(self.attachments) >= attachments.MAX_FILES:
+                    raise ValueError("Attach up to 10 files per message.")
+                self.attachments.append(attachments.store_file(path, self.eng.project_root))
+            except (OSError, ValueError) as exc:
+                self._add("sys", f"\n_Could not attach: {exc}_\n")
+                return False
+        self._refresh()
+        return True
+
+    def paste_text(self, text):
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        try:
+            paths = attachments.paths_in(text, self.eng.cwd, only=True)
+        except (OSError, ValueError):
+            paths = []
+        if paths:
+            self.attach_paths(paths)
+        else:
+            self.input.buffer.insert_text(text, fire_event=False)
+
+    async def paste_clipboard(self):
+        try:
+            mime, data = await attachments.clipboard()
+            if mime in attachments.IMAGE_TYPES:
+                if len(self.attachments) >= attachments.MAX_FILES:
+                    raise ValueError("Attach up to 10 files per message.")
+                self.attachments.append(attachments.store_image(data, mime, self.eng.project_root))
+                self._refresh()
+            else:
+                self.paste_text(data.decode("utf-8", "replace"))
+        except asyncio.TimeoutError:
+            self._add("sys", "\n_The clipboard did not respond. Copy the item again, or use /attach path._\n")
+        except (OSError, ValueError) as exc:
+            self._add("sys", f"\n_Could not paste: {exc}_\n")
+
     # ---------- input ----------
     def on_accept(self, buff):
         line = buff.text.strip()
-        if not line:
+        single_line = "\n" not in line
+        if line == "/copy":
+            self.toggle_copy_view()
+            return False
+        if single_line and (line == "/attach" or line.startswith("/attach ")):
+            paths = attachments.paths_in(line[7:].strip(), self.eng.cwd, only=True)
+            if not paths:
+                self._add("sys", "\n_Use /attach followed by an existing file path. Quote paths containing spaces._\n")
+                return True
+            return not self.attach_paths(paths)
+        if single_line and (line == "/detach" or line.startswith("/detach ")):
+            number = line[7:].strip()
+            if number.isdigit() and 1 <= int(number) <= len(self.attachments):
+                self.attachments.pop(int(number) - 1)
+                self._refresh()
+                return False
+            self._add("sys", "\n_Use /detach followed by the attachment number._\n")
+            return True
+        if self.clipboard_task and not self.clipboard_task.done():
+            self._add("sys", "\n_Finishing the clipboard paste; your draft is kept._\n")
+            return True
+        if not line and not self.attachments:
+            return False
+        if line == "mode":
+            line = "/mode"
+        if single_line and (line == "/mode" or line.startswith("/mode ")):
+            arg = line[5:].strip()
+            if arg:
+                self.set_project_mode(arg)
+            else:
+                self.mode_menu()
+            return False
+        if single_line and self.checklist_command(line):
             return False
         if self.questions:
-            self._answer(line)
-            return False
+            return not self._answer(line)  # retain a draft that is not an approval answer
         if (self.busy and not self.busy.done()) or (self.cmd_task and not self.cmd_task.done()):
-            self._add("sys", "\n_Still working on the last one. Ctrl-C stops it._\n")
-            return False
+            self._add("sys", "\n_Still working on the last one. Your draft is kept; Ctrl-C stops the job._\n")
+            return True
+        dropped = attachments.paths_in(line, self.eng.cwd)
+        if dropped and not self.attach_paths(dropped):
+            return True
+        if dropped and attachments.paths_in(line, self.eng.cwd, only=True):
+            line = "Please inspect the attached files."
         self.scroll_back = 0
         if line.strip() == "/retry":
             if not getattr(self, "last_request", None):
@@ -1124,13 +1369,16 @@ class TUI:
                 return False
             line = self.last_request
             self._add("sys", "\n_Trying again…_\n")
-        if line.startswith(("/", "$")):
+        if (line.startswith("$") or (single_line and line.startswith("/"))) and not dropped:
             skill = expand_skill(line, self.skills)
             if skill:
                 line = (f"@{skill[1]} " if skill[1] else "") + skill[0]
             else:
                 self.cmd_task = asyncio.ensure_future(self.command(line))
                 return False
+        if self.attachments:
+            line = (line or "Please inspect the attached files.") + attachments.prompt(self.attachments)
+            self.attachments = []
         self.last_request = line
         self.blocks.append({"who": "you", "text": line})
         self.version += 1
@@ -1138,6 +1386,8 @@ class TUI:
         return False
 
     async def run(self, line):
+        if self.pending_mode is not None:
+            self.eng.mode, self.pending_mode = self.pending_mode, None
         self.speaker = "sys"
         try:
             await self.eng.turn(line)
@@ -1172,6 +1422,17 @@ class TUI:
             self._add("sys", "\n" + "\n".join(rows) + "\n")
         elif cmd in ("auto", "claude", "codex"):
             e.route = cmd
+        elif cmd == "mode":
+            if not arg:
+                self.mode_menu()
+            else:
+                self.set_project_mode(arg)
+        elif cmd == "setup":
+            self.open_setup()
+        elif cmd == "mouse":
+            self.toggle_mouse()
+        elif cmd == "links":
+            self.links_menu()
         elif cmd in ARG_CHOICES:
             if arg in ARG_CHOICES[cmd]:
                 setattr(e, cmd, arg)
@@ -1297,6 +1558,105 @@ class TUI:
             buf.cursor_position = len(buf.text)
             buf.complete_state = None
 
+    def toggle_copy_view(self):
+        if self.copy_mode:
+            self.copy_mode = False
+            self.app.layout.focus(self.input)
+            self._refresh()
+            return
+        if self.setup_dialog is not None or self.picker is not None:
+            return  # finish the dialog first; never replace a live form beneath its focus
+        text = "".join(fragment[1] for fragment in self.transcript())
+        self.copy_view.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
+        if self.scroll_back:
+            self.copy_view.buffer.cursor_up(count=self.scroll_back)
+        self.copy_mode = True
+        self.app.layout.focus(self.copy_view)
+        self.app.invalidate()  # one redraw to enter; incoming events cannot redraw the frozen view
+
+    def toggle_mouse(self):
+        self.prefs["mouse"] = not self.prefs["mouse"]
+        self._save_prefs()
+        self._refresh()
+
+    def conversation_links(self):
+        return list(dict.fromkeys(m.rstrip(".,;:!?)]}")
+                    for block in self.blocks for m in re.findall(r"https?://[^\s<>`\"]+", block.get("text", ""))))
+
+    def open_link(self, url):
+        import webbrowser
+        if not url.startswith(("http://", "https://")):
+            return
+        try:
+            if not webbrowser.open(url):
+                self._add("sys", f"\n_Could not open a browser. Open this address: {url}_\n")
+        except Exception as exc:
+            self._add("sys", f"\n_Could not open the link: {exc}_\n")
+
+    def links_menu(self):
+        urls = self.conversation_links()
+        if urls:
+            self.open_picker("Open a link — arrows and Enter", [(url, url) for url in urls], self.open_link)
+        else:
+            self._add("sys", "\n_No web links in this conversation yet._\n")
+
+    def clickable_transcript(self):
+        out = []
+        for style, text in self.transcript():
+            start = 0
+            for match in re.finditer(r"https?://[^\s<>`\"]+", text):
+                url = match.group().rstrip(".,;:!?)]}")
+                out.append((style, text[start:match.start()]))
+                def click(event, target=url):
+                    if event.event_type == MouseEventType.MOUSE_UP:
+                        self.open_link(target)
+                out.append((style + " underline", url, click))
+                start = match.start() + len(url)
+            out.append((style, text[start:]))
+        return out
+
+    def set_project_mode(self, mode):
+        if mode not in MODES:
+            self._add("sys", "\n_Choose ask, auto, or unrestricted._\n")
+            return
+        try:
+            project_settings.save(self.eng.project_root, {"mode": mode})
+        except (OSError, ValueError) as exc:
+            self._add("sys", f"\n_Could not save the mode: {exc}_\n")
+            return
+        if self.busy and not self.busy.done():
+            self.pending_mode = mode
+            self._add("sys", f"\n_{MODES[mode][0]} — saved for the next job. "
+                      "The current job keeps its mode; Ctrl-C stops it._\n")
+        else:
+            self.eng.mode, self.pending_mode = mode, None
+            self._add("sys", f"\n_{MODES[mode][0]} — saved for this project._\n")
+
+    def mode_menu(self):
+        from .setup_ui import MODE_LABELS
+        selected = self.pending_mode or self.eng.mode
+        self.open_picker("Permission mode — saved for this project (Esc cancels)",
+                         [(label + (" ✓" if mode == selected else ""), mode)
+                          for mode, label in MODE_LABELS], self.set_project_mode)
+        self.picker["i"] = next(i for i, (_, mode) in enumerate(self.picker["items"]) if mode == selected)
+
+    def open_setup(self):
+        from .setup_ui import Setup
+        try:
+            self.picker = None
+            self.setup_form = Setup(self)
+            self.setup_form.show()
+        except (OSError, ValueError) as exc:
+            self.close_setup()
+            self._add("sys", f"\n_Could not open setup: {exc}_\n")
+
+    def close_setup(self):
+        self.setup_dialog = None
+        self.setup_form = None
+        if self.app:
+            self.app.layout.focus(self.input)
+        self._refresh()
+
     def animation_menu(self):
         """F2: one menu for everything about the monkeys. Picking an option applies it and keeps the menu open."""
         pr = self.prefs
@@ -1367,7 +1727,11 @@ class TUI:
         top = max(0, min(pk["i"] - 5, len(pk["items"]) - 12))
         for n, (label, _) in enumerate(pk["items"][top:top + 12], top):
             on = n == pk["i"]
-            out.append(("class:pick.on" if on else "class:pick", f"{'❯' if on else ' '} {n + 1:>2}. {label}\n"))
+            def click(event, index=n, picker=pk):
+                if event.event_type == MouseEventType.MOUSE_UP and self.picker is picker:
+                    self._pick(index)
+            out.append(("class:pick.on" if on else "class:pick",
+                        f"{'❯' if on else ' '} {n + 1:>2}. {label}\n", click))
         return out
 
     def _pick(self, n=None):
@@ -1513,11 +1877,16 @@ async def run_tui(eng):
     app = tui.build()
     if eng.resume_request:                       # claudex --resume [N] / -c
         tui.resume("" if eng.resume_request == "pick" else str(eng.resume_request))
+    elif not project_settings.load(eng.project_root).get("onboarded"):
+        tui.open_setup()
     ticker = asyncio.ensure_future(tui.animate())
     try:
         await app.run_async()
     finally:
         ticker.cancel()
+        if tui.clipboard_task and not tui.clipboard_task.done():
+            tui.clipboard_task.cancel()
+            await asyncio.gather(tui.clipboard_task, return_exceptions=True)
         tui.save_transcript()
         tui.drop_questions()
         if tui.cmd_task and not tui.cmd_task.done():

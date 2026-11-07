@@ -45,11 +45,13 @@ def describe(tool_call, project_root):
     if isinstance(raw, dict):
         cmd = raw.get("command") or raw.get("cmd") or raw.get("script")
         if isinstance(cmd, list):
-            cmd = " ".join(str(c) for c in cmd)
+            cmd = shlex.join(str(c) for c in cmd)
         command = str(cmd or "")
     title = str(tc.get("title") or "")
     if kind == "run" and not command:
         command = title
+    if kind == "run":
+        command = unwrap_shell(command)
     paths = [str(l.get("path")) for l in tc.get("locations") or [] if isinstance(l, dict) and l.get("path")]
     if isinstance(raw, dict):
         for key in ("file_path", "path", "notebook_path"):
@@ -60,6 +62,24 @@ def describe(tool_call, project_root):
     paths = [str(pathlib.Path(os.path.expanduser(p) if p.startswith("~") else
                               p if os.path.isabs(p) else os.path.join(project_root, p)).resolve()) for p in paths]
     return kind, command.strip(), sorted(set(paths)), title
+
+
+def unwrap_shell(command):
+    """Recognize only a single standard shell invocation, never a chained outer command."""
+    try:
+        words = shlex.split(command)
+    except ValueError:
+        return command
+    shells = {prefix + name for prefix in ("", "/bin/", "/usr/bin/")
+              for name in ("sh", "bash", "zsh")}
+    if len(words) == 3 and words[0] in shells and words[1] in ("-c", "-lc"):
+        # Require an exact shell-quoted roundtrip: separators outside quotes must not disappear.
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        if list(lexer) == words:
+            return words[2]
+    return command
 
 
 def _operands(command):

@@ -19,6 +19,7 @@ class Child:
         self.busy = False
         self.decide = None         # Claudex's permission decider (rules, gatekeeper, you)
         self.usage = {}            # latest usage_update: context used/size and cost so far
+        self.squashed = False      # the context shrank (the agent compacted it): Claudex re-sends its memory
         self.limit_hit = None      # the agent said this turn was refused for a usage limit
         self.loading = False       # replaying history during session/load: nothing to show
         self.resumed = False
@@ -133,6 +134,9 @@ class Child:
         kind = upd.get("sessionUpdate")
         if kind == "usage_update":
             cost = upd.get("cost") or {}
+            before = self.usage.get("used")
+            if isinstance(before, (int, float)) and isinstance(upd.get("used"), (int, float)) and upd["used"] < before:
+                self.squashed = True
             self.usage = {"used": upd.get("used"), "size": upd.get("size"), "cost": cost.get("amount")}
             rl = (upd.get("_meta") or {}).get("_claude/rateLimit") or {}
             if rl.get("status") == "rejected" and rl.get("overageStatus") not in ("allowed", "allowed_warning"):
