@@ -357,6 +357,8 @@ class TUI:
         self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
         self.quit_armed = 0.0       # when Ctrl-C last asked "again to quit?"
         self.picker = None          # an open arrow-key list (e.g. /resume)
+        self.speaker_how = {}       # agent -> "model · reasoning" it's working on now
+        self.q_index = 0            # highlighted option in the waiting permission question
         self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
         self.version = 0
         self.skills = load_skills()
@@ -415,10 +417,11 @@ class TUI:
 
     # ---------- what the engine calls ----------
     def _add(self, who, text):
-        if self.blocks and self.blocks[-1]["who"] == who:
+        how = self.speaker_how.get(who) if who in ("claude", "codex") else None
+        if self.blocks and self.blocks[-1]["who"] == who and self.blocks[-1].get("how") == how:
             self.blocks[-1]["text"] = (self.blocks[-1]["text"] + text)[-BLOCK_CHARS:]
         else:
-            self.blocks.append({"who": who, "text": text[-BLOCK_CHARS:]})
+            self.blocks.append({"who": who, "text": text[-BLOCK_CHARS:], **({"how": how} if how else {})})
         while len(self.blocks) > 1 and (len(self.blocks) > 400
                                          or sum(len(b["text"]) for b in self.blocks) > TOTAL_CHARS):
             self.blocks.pop(0)   # oldest first; the newest block always stays
@@ -470,7 +473,7 @@ class TUI:
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
         fut = asyncio.get_running_loop().create_future()
-        self.questions.append((fut, opts, tc.get("title") or tc.get("kind") or "an action"))
+        self.questions.append((fut, opts, _question_parts(tc, self.eng.cwd)))
         if len(self.questions) == 1:
             self._show_question()
         try:
@@ -481,13 +484,16 @@ class TUI:
     def _show_question(self):
         if not self.questions:
             return
-        _, opts, title = self.questions[0]
+        _, opts, q = self.questions[0]
         keys = self._keys(opts)
-        lines = [f"{title}", ""] + [f"  [{keys.get(o.get('optionId'), str(n)).upper()}] {o.get('name')}"
-                                    for n, o in enumerate(opts, 1)]
-        lines.append("_Press the letter (or type its number and Enter)._")
-        self._add("ask", "\n".join(lines))
+        who = self.NAMES.get(self.speaker, "An agent")
+        self.q_index = 0                       # the highlighted option (arrow keys move it)
+        self.blocks.append({"who": "ask", "qid": id(self.questions[0][0]), "text": f"{who} {q['what']}", "code": q["code"],
+                            "options": [f"[{keys.get(o.get('optionId'), str(n)).upper()}] {o.get('name')}"
+                                        for n, o in enumerate(opts, 1)]})
         self.blocks.append({"who": "sys", "text": ""})
+        self.version += 1
+        self._refresh()
 
     @staticmethod
     def _keys(opts):
@@ -503,7 +509,8 @@ class TUI:
         return letters
 
     def _answer(self, line):
-        fut, opts, title = self.questions[0]
+        fut, opts, q = self.questions[0]
+        title = q["short"]
         word = line.strip().lower()
         keys = self._keys(opts)
         pick = None
@@ -518,6 +525,8 @@ class TUI:
         self.questions.pop(0)
         if not fut.done():
             fut.set_result({"outcome": {"outcome": "selected", "optionId": pick["optionId"]}})
+        self.q_index = 0
+        self.version += 1
         self._add("sys", f"\n_You chose “{pick.get('name')}” for: {title[:100]}_\n")
         self._show_question()
 
@@ -532,14 +541,17 @@ class TUI:
         self.live["now"] = what
         self._refresh()
 
-    def activity(self, who, state, target=None):
+    def activity(self, who, state, target=None, how=None):
         if who in ("claude", "codex"):
             self.speaker = who
+            if how and state == "working":
+                self.speaker_how[who] = how       # shown next to its name: "Claude · sonnet · medium"
         labels = {"thinking": ("The lead", "planning…"), "working": (None, "starting…"),
                   "reviewing": (None, "checking the other's work…"), "checking": (None, "giving a second opinion…")}
         if state in labels:
             name, now = labels[state]
-            self.live = {"who": name or self.NAMES.get(who, "Claudex"), "since": time.time(), "actions": 0, "now": now}
+            self.live = {"who": (name or self.NAMES.get(who, "Claudex")) + (f" ({how})" if how else ""),
+                         "since": time.time(), "actions": 0, "now": now}
         elif state in ("done", "stopped"):
             self.live = {"who": None, "since": time.time(), "actions": 0, "now": ""}
         if state == "reviewing" and target in ("claude", "codex") and self.playful:
@@ -826,9 +838,23 @@ class TUI:
             if who == "stop":
                 frags.append(("class:stop bold", "■ Stopped\n"))
             elif who == "ask":
-                frags.append(("class:ask bold", "⚠ Your answer needed\n"))
+                frags.append(("class:ask bold", "⚠ Your answer needed: " + b["text"] + "\n"))
+                for line in b.get("code") or []:
+                    frags.append(("class:dim", "  │ "))
+                    frags.append(("class:code", line + "\n"))
+                frags.append(("", "\n"))
+                live = bool(self.questions) and b.get("qid") == id(self.questions[0][0])
+                for n, o in enumerate(b.get("options") or []):
+                    on = live and n == self.q_index
+                    frags.append(("class:pick.on" if on else "class:ask", f"  {'❯' if on else ' '} {o}  \n"))
+                frags.append(("class:dim", "  ↑ ↓ and Enter, or press the letter." if live else "  (answered)"))
+                frags.append(("", "\n\n"))
+                continue
             elif who != "sys":
-                frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}\n"))
+                frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}"))
+                if b.get("how"):
+                    frags.append(("class:dim", f" · {b['how']}"))
+                frags.append(("", "\n"))
             frags.extend(_md(b["text"].strip("\n"), {"sys": "class:sys", "stop": "class:stop", "ask": "class:ask"}.get(who, "class:body"),
                              self._chat_width()))
             frags.append(("", "\n\n"))
@@ -866,9 +892,9 @@ class TUI:
         if time.time() - self.quit_armed < 2:
             return [("class:danger", " Press Ctrl-C again to quit (Ctrl-D also quits) ")]
         if self.questions:
-            _, opts, title = self.questions[0]
+            _, opts, q = self.questions[0]
             keys = "/".join(k.upper() for k in self._keys(opts).values())
-            left = f" ⚠ {self.NAMES.get(self.speaker, 'An agent')} wants to: {title[:60]}  press {keys} "
+            left = f" ⚠ {self.NAMES.get(self.speaker, 'An agent')} {q['what']}: {q['short'][:50]}  press {keys} "
         elif self.busy and not self.busy.done():
             lv = self.live
             secs = int(time.time() - lv["since"])
@@ -976,11 +1002,30 @@ class TUI:
             self._refresh()
 
         waiting = Condition(lambda: bool(self.questions) and not self.input.text)
+
+        @kb.add("up", filter=waiting & ~picking, eager=True)
+        def _(event):
+            self.q_index = max(0, self.q_index - 1)
+            self.version += 1
+
+        @kb.add("down", filter=waiting & ~picking, eager=True)
+        def _(event):
+            self.q_index = min(len(self.questions[0][1]) - 1, self.q_index + 1)
+            self.version += 1
+
+        @kb.add("enter", filter=waiting & ~picking, eager=True)
+        def _(event):
+            self._answer(str(self.q_index + 1))
+            self._refresh()
         for key in ("y", "n", "a", "r", "Y", "N", "A", "R"):
             @kb.add(key, filter=waiting)
             def _(event, key=key):            # one key answers the question, no Enter needed
                 self._answer(key.lower())
                 self._refresh()
+
+        @kb.add("c-z")
+        def _(event):
+            pass                               # don't type a stray ^Z
 
         @kb.add("c-d")
         def _(event):
@@ -1295,6 +1340,39 @@ def _blocks_from_notes(text):
             if body:
                 blocks.append({"who": who, "text": body})
     return blocks
+
+
+QUESTION_LINES = 12
+
+
+def _question_parts(tc, cwd):
+    """A permission question, readable: what the agent wants to do, the command or file as plain code (cut to
+    a dozen lines), and a one-line version for the status bar."""
+    kind = str(tc.get("kind") or "").lower()
+    raw = tc.get("rawInput") if isinstance(tc.get("rawInput"), dict) else {}
+    command = raw.get("command") or raw.get("cmd")
+    if isinstance(command, list):
+        command = " ".join(command)
+    path = raw.get("file_path") or raw.get("path") or ((tc.get("locations") or [{}])[0] or {}).get("path")
+    url = raw.get("url")
+    title = str(tc.get("title") or kind or "an action")
+    if command:
+        what, body = "wants to run a command", str(command)
+    elif url:
+        what, body = "wants to open a web page", str(url)
+    elif path:
+        verb = {"edit": "change", "delete": "delete", "move": "move", "read": "read"}.get(kind, "use")
+        what, body = f"wants to {verb} a file", str(path)
+    else:
+        what, body = "wants to do something", title
+    root = str(cwd).rstrip("/")
+    body = body.replace(f"cd {root} && ", "").replace(root + "/", "")
+    lines = body.rstrip().split("\n")
+    code = [l[:220] for l in lines[:QUESTION_LINES]]
+    if len(lines) > QUESTION_LINES:
+        code.append(f"… {len(lines) - QUESTION_LINES} more line{'s' if len(lines) - QUESTION_LINES != 1 else ''}")
+    short = " ".join(lines[0].split()) + (" …" if len(lines) > 1 else "")
+    return {"what": what, "code": code, "short": short}
 
 
 def _tidy_command(text, cwd):

@@ -256,11 +256,13 @@ class Engine:
         self._append(self.log, json.dumps({"at": datetime.datetime.now().isoformat(timespec="seconds"),
                                            **row}) + "\n")
 
-    def _act(self, who, state, target=None):
-        """Tell a screen that wants to know (the full-screen UI) who is doing what right now."""
+    def _act(self, who, state, target=None, model=None, effort=None):
+        """Tell a screen that wants to know (the full-screen UI) who is doing what right now, on which model."""
         f = getattr(self.ui, "activity", None)
         if f:
             try:
+                f(who, state, target, f"{model} · {effort}" if model else None)
+            except TypeError:
                 f(who, state, target)
             except Exception:
                 pass
@@ -633,7 +635,7 @@ class Engine:
             plan = self._single(text, forced, rules, f"you chose {forced.title()} only")
         else:
             agent, model, effort = self._lead(rules)
-            self._act("lead", "thinking")
+            self._act("lead", "thinking", model=model, effort=effort)
             await self.ui.say(f"_{fun.pick(fun.PLANNING)}… (lead: {agent.title()} {model}, {effort})_\n\n")
             try:
                 plan = await self.plan(text, rules)
@@ -880,7 +882,7 @@ class Engine:
                 else:
                     await self.ui.say(f"{head} · attempt {attempt}\n\n")
                 started = asyncio.get_running_loop().time()
-                self._act(agent, "working")
+                self._act(agent, "working", model=model, effort=effort)
                 self.active = c
                 try:
                     stop, out = await asyncio.wait_for(c.prompt(message), step_timeout)
@@ -969,7 +971,7 @@ class Engine:
     async def _review(self, s, text, out, diff, files, truncated, rules):
         who = other(s["agent"])
         r = rules["reviewers"][who]
-        self._act(who, "reviewing", s["agent"])
+        self._act(who, "reviewing", s["agent"], r["model"], r["effort"])
         await self.ui.say(f"_{fun.pick(fun.REVIEWING)}: {who.title()} {r['model']} ({r['effort']})…_ ")
         prompt = (
             "You are reviewing changes another AI agent just made, as a strict senior engineer. You may read "

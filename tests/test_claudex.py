@@ -1624,3 +1624,65 @@ def test_picker_tab_and_abbreviations(tmp_path):
     assert "Did you mean" in t.blocks[-1]["text"]
     asyncio.run(t.command("/stat"))                  # clear: /status
     assert "Routing" in t.blocks[-1]["text"]
+
+
+def test_long_command_question_is_plain_and_short(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+    script = "cd " + str(tmp_path) + " && python3 - <<'EOF'\n" + "\n".join(
+        f"rep('''**bold** | table | row {n}''')" for n in range(30)) + "\nEOF"
+    opts = [{"optionId": "y", "name": "Yes", "kind": "allow_once"}, {"optionId": "n", "name": "No", "kind": "reject_once"}]
+
+    async def go():
+        t.busy = asyncio.ensure_future(asyncio.sleep(30))
+        t.speaker = "claude"
+        q = asyncio.ensure_future(t.permission({"toolCall": {"kind": "execute", "title": script,
+                                                             "rawInput": {"command": script}}, "options": opts}))
+        await asyncio.sleep(0)
+        shown = "".join(x for _, x in t.transcript())
+        bar = "".join(x for _, x in t.status())
+        t._answer("y")
+        return shown, bar, await q
+    shown, bar, answer = asyncio.run(go())
+    assert "Claude wants to run a command" in shown and "**bold**" in shown       # code kept as typed, not formatted
+    assert "row 10" in shown and "row 11" not in shown and "20 more lines" in shown  # cut to a dozen lines
+    assert str(tmp_path) not in shown and len(bar) < 200 and answer["outcome"]["optionId"] == "y"
+
+
+def test_permission_with_arrow_keys(tmp_path):
+    T, t, e = _tui(tmp_path)
+    app = t.build()
+    opts = [{"optionId": "y", "name": "Yes", "kind": "allow_once"},
+            {"optionId": "a", "name": "Yes, and don't ask again", "kind": "allow_always"},
+            {"optionId": "n", "name": "No", "kind": "reject_once"}]
+
+    def key(name):
+        for b in app.key_bindings.bindings:
+            if [getattr(k, "value", k) for k in b.keys] == [name] and b.filter():
+                return b.handler
+    ev = type("E", (), {"app": None})()
+
+    async def go():
+        t.busy = asyncio.ensure_future(asyncio.sleep(30))
+        q = asyncio.ensure_future(t.permission({"toolCall": {"kind": "execute", "rawInput": {"command": "git push"}},
+                                                "options": opts}))
+        await asyncio.sleep(0)
+        key("down")(ev)
+        key("down")(ev)
+        shown = "".join(x for _, x in t.transcript())
+        key("c-m")(ev)
+        return shown, await q
+    shown, answer = asyncio.run(go())
+    assert "❯ [N] No" in shown and answer["outcome"]["optionId"] == "n"
+
+
+def test_names_show_model_and_reasoning(tmp_path):
+    T, t, e = _tui(tmp_path)
+
+    async def go():
+        t.busy = asyncio.ensure_future(asyncio.sleep(30))
+        t.activity("claude", "working", None, "sonnet · medium")
+        await t.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "hello"}})
+        return "".join(x for _, x in t.transcript()), "".join(x for _, x in t.status())
+    shown, bar = asyncio.run(go())
+    assert "● Claude · sonnet · medium" in shown and "Claude (sonnet · medium) is working" in bar
