@@ -7,10 +7,10 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
-from composer import engine, gitsnap, headless  # noqa: E402
-from composer.__main__ import chat_parser, settings_from  # noqa: E402
-from composer.ladder import next_rung  # noqa: E402
-from composer.locks import Lock  # noqa: E402
+from claudex import engine, gitsnap, headless  # noqa: E402
+from claudex.__main__ import chat_parser, settings_from  # noqa: E402
+from claudex.ladder import next_rung  # noqa: E402
+from claudex.locks import Lock  # noqa: E402
 
 LADDER = engine.load_rules()["ladder"]
 
@@ -424,7 +424,7 @@ def test_bad_snapshot_diff_raises(repo):
 
 
 def test_worker_close_kills_leftover_children(tmp_path):
-    from composer.child import Child, _group_alive
+    from claudex.child import Child, _group_alive
     script = tmp_path / "w.sh"
     script.write_text("#!/bin/sh\nsleep 300 &\nexit 0\n")   # the connector exits, leaving a child behind
     script.chmod(0o755)
@@ -442,7 +442,7 @@ def test_worker_close_kills_leftover_children(tmp_path):
 
 # ---------- commands and skills ----------
 def test_skill_expansion_routes_to_the_agent_that_has_it():
-    from composer.commands import expand_skill
+    from claudex.commands import expand_skill
     skills = {"deployify": {"description": "ship it", "agents": ["claude"]},
               "both": {"description": "", "agents": ["claude", "codex"]}}
     assert expand_skill("/deployify the portal", skills) == ("Use the deployify skill. the portal", "claude")
@@ -451,7 +451,7 @@ def test_skill_expansion_routes_to_the_agent_that_has_it():
 
 
 def test_real_skills_load_and_acp_menu_lists_them():
-    from composer.commands import acp_commands, load_skills
+    from claudex.commands import acp_commands, load_skills
     skills = load_skills()
     assert "deployify" in skills and not any(n.endswith("-workspace") for n in skills)
     names = [c["name"] for c in acp_commands(skills)]
@@ -459,7 +459,7 @@ def test_real_skills_load_and_acp_menu_lists_them():
 
 
 def test_skill_name_must_end_at_a_space():
-    from composer.commands import expand_skill
+    from claudex.commands import expand_skill
     skills = {"deployify": {"description": "", "agents": ["claude"]}}
     assert expand_skill("/deployify/README.md explain this", skills) is None
 
@@ -476,7 +476,7 @@ class FakePeer:
 
 
 def _server_session(tmp_path):
-    from composer.server import Server
+    from claudex.server import Server
     srv = Server({})
     srv.peer = FakePeer()
     return srv
@@ -519,17 +519,17 @@ def test_acp_local_command_can_be_cancelled(tmp_path, monkeypatch):
 
 def test_cancelled_diagnostic_leaves_nothing_running(tmp_path, monkeypatch):
     """A cancelled /doctor in Agents of Empires takes its whole process group with it."""
-    from composer import server
-    from composer.child import _group_alive
+    from claudex import server
+    from claudex.child import _group_alive
     fake = tmp_path / "bin"
     fake.mkdir()
     script = fake / "claudex"
     script.write_text("#!/bin/sh\nsleep 300 &\nsleep 300\n")
     script.chmod(0o755)
     real_path = pathlib.Path
-    monkeypatch.setattr(server.pathlib, "Path", lambda *a: tmp_path / "composer" / "server.py"
+    monkeypatch.setattr(server.pathlib, "Path", lambda *a: tmp_path / "claudex" / "server.py"
                         if a and str(a[0]).endswith("server.py") else real_path(*a))
-    (tmp_path / "composer").mkdir()
+    (tmp_path / "claudex").mkdir()
     srv = _server_session(tmp_path)
     groups = []
     real_exec = asyncio.create_subprocess_exec
@@ -600,7 +600,7 @@ def test_everyone_shares_one_memory(job):
 
 # ---------- the full-screen app ----------
 def _tui(tmp_path):
-    from composer import tui as T
+    from claudex import tui as T
     T.PREFS = tmp_path / "ui.json"
     e = engine.Engine(str(tmp_path), None, settings={}, session_key="t")
     t = T.TUI(e)
@@ -779,7 +779,7 @@ def test_long_handover_keeps_its_start_and_a_pointer(job):
 
 
 def test_log_from_a_subfolder_finds_the_repo_memory(job, capsys):
-    from composer import tools
+    from claudex import tools
     repo, calls, answers = job
     (repo / "web").mkdir()
     answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
@@ -829,7 +829,7 @@ def test_f2_steps_through_all_nine_and_remembers(tmp_path):
 
 
 def test_old_animation_setting_still_honoured(tmp_path):
-    from composer import tui as T
+    from claudex import tui as T
     T.PREFS = tmp_path / "ui.json"
     T.PREFS.write_text('{"animate": false, "layout": "wide", "palette": "Jungle"}')
     assert T.TUI(engine.Engine(str(tmp_path), None, session_key="t")).prefs["style"] == "off"

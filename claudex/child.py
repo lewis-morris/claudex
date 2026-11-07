@@ -120,7 +120,7 @@ class Child:
                 tc["toolCallId"] = f"{self.name}:{tc['toolCallId']}"
             p["toolCall"] = tc
             return await self.ui.permission(p)
-        raise RpcError(-32601, f"composer does not provide {method}")
+        raise RpcError(-32601, f"claudex does not provide {method}")
 
 
 def _group_alive(pgid):

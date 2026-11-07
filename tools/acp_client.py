@@ -39,7 +39,7 @@ def main():
             except queue.Empty:
                 continue
             if not line:
-                return {"error": "composer exited"}
+                return {"error": "claudex exited"}
             m = json.loads(line)
             if m.get("id") == i and "method" not in m:
                 return m

@@ -5,6 +5,7 @@ import sys
 USAGE = """claudex [options]            chat in this folder
 claudex -p "message"         run one message, then exit (exit code 1 if it failed)
 claudex --acp                run as an agent for Agents of Empires (or any ACP client)
+claudex login [claude|codex] sign in to whichever isn't signed in (--device for a code, --again to redo)
 claudex doctor [--live]      check logins, versions, connectors and every model in the rules
 claudex rules [--edit]       show (or edit) who does what
 claudex log [-n N]           recent steps in this project
@@ -53,7 +54,7 @@ def main():
     if argv and argv[0] == "demo":
         from . import ui_demo
         sys.exit(ui_demo.main())
-    if argv and argv[0] in ("doctor", "rules", "log", "update"):
+    if argv and argv[0] in ("doctor", "rules", "log", "update", "login"):
         from . import tools
         sys.exit(tools.main(argv))
     args, _unknown = chat_parser().parse_known_args(argv)  # AoE may append agent flags; ignore them

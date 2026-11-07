@@ -2,3 +2,4 @@ __pycache__/
 .composer/
 .claudex/
 .pytest_cache/
+composer

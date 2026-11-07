@@ -29,6 +29,52 @@ def _run(cmd, timeout=60):
         return 1, str(e)
 
 
+def login_state():
+    """{"claude": (signed_in, detail), "codex": (signed_in, detail)}"""
+    out = {}
+    code, text = _run(["claude", "auth", "status"])
+    try:
+        st = json.loads(text)
+        out["claude"] = (bool(st.get("loggedIn")), st.get("authMethod") or "not signed in")
+    except Exception:
+        out["claude"] = (False, (text.splitlines() or ["claude not found"])[-1][:80])
+    code, text = _run(["codex", "login", "status"])
+    last = (text.splitlines() or ["codex not found"])[-1]
+    out["codex"] = (code == 0 and "Logged in" in text, last[:80])
+    return out
+
+
+def login(which=None, device=False, again=False):
+    """Sign in to whichever of Claude and Codex isn't signed in (or the one named), in this terminal."""
+    if not sys.stdin.isatty():
+        print("claudex login needs a terminal you can type in (it opens each sign-in).")
+        return 1
+    commands = {"claude": ["claude", "auth", "login"],
+                "codex": ["codex", "login"] + (["--device-auth"] if device else [])}
+    before = login_state()
+    ran = False
+    for agent in (which,) if which else ("claude", "codex"):
+        ok, detail = before[agent]
+        if ok and not again:
+            print(f" {OK} {agent.title()}: already signed in ({detail})")
+            continue
+        print(f"\nSigning in to {agent.title()}… (follow the steps it shows; a browser may open)\n")
+        subprocess.call(commands[agent], env=headless._env())
+        ran = True
+    if not ran:
+        return 0
+    print()
+    after, bad = login_state(), 0
+    for agent in ("claude", "codex"):
+        ok, detail = after[agent]
+        bad += not ok
+        print(f" {OK if ok else BAD} {agent.title()}: {'signed in' if ok else 'NOT signed in'} ({detail})")
+    if bad:
+        print("\nClaudex will stop rather than guess if a job needs the agent that isn't signed in. "
+              "Try again with `claudex login " + ("codex --device" if not after["codex"][0] else "claude") + "`.")
+    return 1 if bad else 0
+
+
 def used_models(rules):
     """Every (agent, model, effort) the rules can ask for, with where it's used."""
     out = {}
@@ -85,7 +131,7 @@ def doctor(live=False):
         days = (datetime.datetime.fromisoformat(exp.replace("Z", "+00:00"))
                 - datetime.datetime.now(datetime.timezone.utc)).days if exp else None
         if not st.get("loggedIn"):
-            line(BAD, "Claude: not logged in. Run: claude auth login")
+            line(BAD, "Claude: not signed in. Run: claudex login")
         elif days is not None and days < 7:
             line(WARN, f"Claude: logged in ({st.get('authMethod')}), but the login ends in {days} days")
         else:
@@ -96,7 +142,7 @@ def doctor(live=False):
     line(OK if code == 0 else BAD, f"Codex {out.splitlines()[-1] if out else '(not found)'}")
     code, out = _run(["codex", "login", "status"])
     line(OK if code == 0 and "Logged in" in out else BAD,
-         f"Codex: {out.splitlines()[-1] if out else 'unknown'}" + ("" if "Logged in" in out else ". Run: codex login"))
+         f"Codex: {out.splitlines()[-1] if out else 'unknown'}" + ("" if "Logged in" in out else ". Run: claudex login"))
 
     print("\nRules")
     try:
@@ -238,6 +284,10 @@ def main(argv):
     lg.add_argument("-n", type=int, default=20)
     lg.add_argument("--cwd", default=".")
     sub.add_parser("update", help="update Claude, Codex and the connectors, then run doctor")
+    li = sub.add_parser("login", help="sign in to Claude and/or Codex (only the ones that need it)")
+    li.add_argument("agent", nargs="?", choices=["claude", "codex"], help="just this one")
+    li.add_argument("--device", action="store_true", help="Codex: sign in with a code (for a remote machine)")
+    li.add_argument("--again", action="store_true", help="sign in again even if already signed in")
     a = ap.parse_args(argv)
     if a.cmd == "doctor":
         return doctor(a.live)
@@ -245,4 +295,6 @@ def main(argv):
         return show_rules(a.edit)
     if a.cmd == "log":
         return show_log(a.cwd, a.n)
+    if a.cmd == "login":
+        return login(a.agent, a.device, a.again)
     return update()

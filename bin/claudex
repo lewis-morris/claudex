@@ -1,4 +1,4 @@
 #!/bin/sh
 # Claudex launcher: terminal chat by default, `claudex --acp` for Agents of Empires.
 export PATH="/home/lewismorris/.nvm/versions/node/v24.18.0/bin:/home/lewismorris/.local/bin:$PATH"
-exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/home/lewismorris/Projects/composer"); sys.argv[0] = "claudex"; from composer.__main__ import main; main()' "$@"
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, "/home/lewismorris/Projects/claudex"); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$@"

@@ -78,12 +78,12 @@ Everything is in `rules.toml` (re-read on every message): the lead, reviewers, t
 
 ## Files
 
-- `composer/engine.py`: plan, second opinion, steps, reviews, escalation, final check, memory.
-- `composer/headless.py`: read-only one-shot calls (lead, reviews, map) with no add-ons, hooks or Chrome.
-- `composer/child.py`: drives one worker over ACP. `composer/gitsnap.py`: before/after snapshots without touching your git index.
-- `composer/ladder.py`, `composer/locks.py`, `composer/tools.py` (doctor, rules, log, update).
-- `composer/server.py` (ACP agent), `composer/cli.py` (terminal), `tests/` (`uv run --no-project --with pytest python -m pytest tests`).
-- `composer/tui.py` (the full screen and the monkeys), `composer/commands.py` (commands and skills for both menus), `composer/fun.py` (the chatter).
+- `claudex/engine.py`: plan, second opinion, steps, reviews, escalation, final check, memory.
+- `claudex/headless.py`: read-only one-shot calls (lead, reviews, map) with no add-ons, hooks or Chrome.
+- `claudex/child.py`: drives one worker over ACP. `claudex/gitsnap.py`: before/after snapshots without touching your git index.
+- `claudex/ladder.py`, `claudex/locks.py`, `claudex/tools.py` (doctor, rules, log, update).
+- `claudex/server.py` (ACP agent), `claudex/cli.py` (terminal), `tests/` (`uv run --no-project --with pytest python -m pytest tests`).
+- `claudex/tui.py` (the full screen and the monkeys), `claudex/commands.py` (commands and skills for both menus), `claudex/fun.py` (the chatter).
 - Design and the Codex review it went through: `docs/claudex-design.md`.
 
 ## Not done yet
