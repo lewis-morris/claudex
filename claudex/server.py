@@ -64,7 +64,7 @@ def load_session_meta(sid):
     if isinstance(data.get("key"), str) and SAFE_ID.match(data["key"]):
         out["key"] = data["key"]
     settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-    out["settings"] = {k: v for k, v in settings.items() if k in PICKERS and v in PICKERS[k]}
+    out["settings"] = {k: v for k, v in settings.items() if k in PICKERS and isinstance(v, str) and v in PICKERS[k]}
     return out
 
 
@@ -112,6 +112,8 @@ class Server:
                 raise RpcError(-32602, "session/load needs a plain session id")
             if loading and sid in self.sessions:
                 e = self.sessions[sid]
+                if p.get("cwd") and os.path.realpath(p["cwd"]) != os.path.realpath(e.cwd):
+                    raise RpcError(-32602, f"this session belongs to {e.cwd}, not {p['cwd']}")
                 return {"configOptions": config_options(e)}
             saved = load_session_meta(sid) if loading else {}
             cwd = p.get("cwd") or saved.get("cwd") or "."
