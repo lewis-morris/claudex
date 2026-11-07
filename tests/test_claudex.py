@@ -158,8 +158,10 @@ class FakeChild:
         self.decide = None
         FakeChild.started.append(self)
 
-    async def start(self):
-        pass
+    async def start(self, resume_id=None):
+        self.session_id = resume_id or f"{self.name}-session"
+        self.resumed = bool(resume_id)
+        FakeChild.resumed_with = getattr(FakeChild, "resumed_with", []) + [resume_id]
 
     async def set(self, cid, value):
         if value in self.options.get(cid, []):
@@ -1573,7 +1575,7 @@ def test_resume_an_earlier_conversation(job, tmp_path):
     blocks = _blocks_from_notes((repo / ".claudex/sessions/older/notes.md").read_text())
     assert blocks[0] == {"who": "you", "text": "build the quote maths"} and blocks[1]["who"] == "codex"
     T, t, e = _tui(repo)
-    t.resume("1")
+    asyncio.run(t._do_resume(found[0]))
     assert e.session_key == "older" and any("quote maths" in b["text"] for b in t.blocks)
 
 
@@ -1590,3 +1592,35 @@ def test_ctrl_c_twice_quits(tmp_path):
     assert not exited and "again to quit" in "".join(x for _, x in t.status())
     handler(ev)
     assert exited                                            # pressed again within two seconds: quit
+
+
+def test_resume_reloads_the_workers_own_conversations(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "first job")]
+    FakeChild.resumed_with = []
+    asyncio.run(engine.Engine(str(repo), UI(), settings={}, session_key="old").turn("job one"))
+    assert (repo / ".claudex/sessions/old/workers.json").exists()
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="new")
+    asyncio.run(e.switch_session("old"))
+    FakeChild.script = [("b.py", "2\n", "second job")]
+    asyncio.run(e.turn("job two"))
+    assert FakeChild.resumed_with[-1] == "codex-session"          # Codex reloaded its own conversation
+
+
+def test_picker_tab_and_abbreviations(tmp_path):
+    T, t, e = _tui(tmp_path)
+    t.build()
+    picked = []
+    t.open_picker("Pick", [("one", 1), ("two", 2), ("three", 3)], picked.append)
+    t.picker["i"] = 2
+    t._pick()
+    assert picked == [3] and t.picker is None
+    t.input.text = "/resu"
+    t._complete_input()
+    assert t.input.text.startswith("/resume")
+    asyncio.run(t.command("/re"))                    # ambiguous: resume, retry…
+    assert "Did you mean" in t.blocks[-1]["text"]
+    asyncio.run(t.command("/stat"))                  # clear: /status
+    assert "Routing" in t.blocks[-1]["text"]

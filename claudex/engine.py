@@ -194,8 +194,14 @@ class Engine:
         self.session_key = key
         self._job = None
 
+    async def switch_session(self, key):
+        """Carry on an earlier conversation: stop this one's workers, then use that one's notes and workers."""
+        await self.close()
+        self.children = {}
+        self.use_session(key)
+
     def use_session(self, key):
-        """Carry on an earlier conversation: its notes, log and handovers become this session's."""
+        """Carry on an earlier conversation: its notes, log, handovers and workers become this session's."""
         self.session_key = key
         self.notes_dir = self.root / "sessions" / key
         self.notes = self.notes_dir / "notes.md"
@@ -342,13 +348,35 @@ class Engine:
             return c
         c = Child(name, rules["agents"][name], self.cwd, self.ui, self.mcp_servers)
         c.decide = lambda params, agent=base(name): self.decide_permission(agent, params)
+        resume_id = self._worker_ids().get(name)
         try:
-            await asyncio.wait_for(c.start(), START_TIMEOUT)
+            await asyncio.wait_for(c.start(resume_id), START_TIMEOUT)
         except BaseException:
             await c.close(grace=0)
             raise
+        if resume_id and c.resumed:
+            await self.ui.say(f"_{base(name).title()} picked its earlier conversation back up._\n\n")
         self.children[name] = c
+        self._save_worker_id(name, c.session_id)
         return c
+
+    def _worker_ids(self):
+        """Each worker's own conversation id in this Claudex session, so a resume can reload them."""
+        try:
+            return json.loads((self.notes_dir / "workers.json").read_text())
+        except Exception:
+            return {}
+
+    def _save_worker_id(self, name, sid):
+        if self.dry_run or not sid:
+            return
+        try:
+            ids = self._worker_ids()
+            ids[name] = sid
+            self.notes_dir.mkdir(parents=True, exist_ok=True)
+            (self.notes_dir / "workers.json").write_text(json.dumps(ids))
+        except Exception:
+            pass
 
     async def _stop_child(self, name):
         c = self.children.pop(name, None)

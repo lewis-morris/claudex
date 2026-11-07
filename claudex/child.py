@@ -20,8 +20,12 @@ class Child:
         self.decide = None         # Claudex's permission decider (rules, gatekeeper, you)
         self.usage = {}            # latest usage_update: context used/size and cost so far
         self.limit_hit = None      # the agent said this turn was refused for a usage limit
+        self.loading = False       # replaying history during session/load: nothing to show
+        self.resumed = False
 
-    async def start(self):
+    async def start(self, resume_id=None):
+        """Start the worker. With resume_id, reload that earlier Claude/Codex conversation (if the agent can),
+        so it remembers everything it did; otherwise (or if that fails) start a fresh one."""
         env = tool_env()
         if self.name == "claude_browser" and "CLAUDE_CODE_EXECUTABLE" not in env:
             launcher = chrome_launcher()   # Claude with Claude in Chrome switched on
@@ -41,9 +45,23 @@ class Child:
 
         self.peer = Peer(self.proc.stdout, write, self._on_request, self._on_notify, name=self.name)
         asyncio.create_task(self.peer.run())
-        await self.peer.request("initialize", {
+        init = await self.peer.request("initialize", {
             "protocolVersion": 1,
             "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False}})
+        can_load = bool(((init or {}).get("agentCapabilities") or {}).get("loadSession"))
+        self.resumed = False
+        if resume_id and can_load:
+            self.loading = True             # the agent replays its history while loading: don't show it again
+            try:
+                res = await self.peer.request("session/load", {"sessionId": resume_id, "cwd": self.cwd,
+                                                               "mcpServers": self.mcp_servers})
+                self.session_id, self.resumed = resume_id, True
+                self._load_options((res or {}).get("configOptions"))
+                return
+            except Exception:
+                pass                        # couldn't reload it: start fresh (Claudex's notes still carry context)
+            finally:
+                self.loading = False
         res = await self.peer.request("session/new", {"cwd": self.cwd, "mcpServers": self.mcp_servers})
         self.session_id = res["sessionId"]
         self._load_options(res.get("configOptions"))
@@ -109,7 +127,7 @@ class Child:
 
     # --- messages from the worker ---
     async def _on_notify(self, method, params):
-        if method != "session/update":
+        if method != "session/update" or self.loading:
             return
         upd = dict(params.get("update") or {})
         kind = upd.get("sessionUpdate")

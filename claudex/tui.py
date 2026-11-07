@@ -356,9 +356,11 @@ class TUI:
         self.cmd_task = None        # a running /doctor, /rules or /log
         self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
         self.quit_armed = 0.0       # when Ctrl-C last asked "again to quit?"
+        self.picker = None          # an open arrow-key list (e.g. /resume)
         self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
         self.version = 0
         self.skills = load_skills()
+        self._completer = make_completer(self.skills)
         self.t0 = time.time()
         self.app = None
 
@@ -887,7 +889,7 @@ class TUI:
     # ---------- layout ----------
     def build(self):
         self.input = TextArea(height=1, prompt=[("class:accent bold", "› ")], multiline=False,
-                              completer=make_completer(self.skills), complete_while_typing=True,
+                              completer=self._completer, complete_while_typing=True,
                               accept_handler=self.on_accept, style="class:input")
         self.stage = Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], style="class:bg")
         self.chat = Window(FormattedTextControl(self.transcript, get_cursor_position=self.cursor, show_cursor=False),
@@ -912,9 +914,43 @@ class TUI:
             Frame(self.input, style="class:frame"),
             Window(FormattedTextControl(self.status), height=1, style="class:status"),
         ], style="class:bg")
+        picking = Condition(lambda: self.picker is not None)
+        picker_box = ConditionalContainer(
+            Frame(Window(FormattedTextControl(self.picker_text), style="class:panel", wrap_lines=False,
+                         height=lambda: min(12, len(self.picker["items"])) if self.picker else 1),
+                  title=lambda: self.picker["title"] if self.picker else "", style="class:frame"),
+            filter=picking)
         root = FloatContainer(root, floats=[Float(xcursor=True, ycursor=True,
-                                                  content=CompletionsMenu(max_height=14, scroll_offset=1))])
+                                                  content=CompletionsMenu(max_height=14, scroll_offset=1)),
+                                            Float(content=picker_box, top=3, left=4, right=4)])
         kb = KeyBindings()
+
+        @kb.add("up", filter=picking, eager=True)
+        def _(event):
+            self.picker["i"] = max(0, self.picker["i"] - 1)
+
+        @kb.add("down", filter=picking, eager=True)
+        def _(event):
+            self.picker["i"] = min(len(self.picker["items"]) - 1, self.picker["i"] + 1)
+
+        @kb.add("enter", filter=picking, eager=True)
+        def _(event):
+            self._pick()
+
+        @kb.add("escape", filter=picking, eager=True)
+        def _(event):
+            self.picker = None
+
+        for digit in "123456789":
+            @kb.add(digit, filter=picking, eager=True)
+            def _(event, digit=digit):
+                self._pick(int(digit) - 1)
+
+        typing_command = Condition(lambda: self.input.text[:1] in ("/", "$", "@") and " " not in self.input.text)
+
+        @kb.add("tab", filter=typing_command, eager=True)
+        def _(event):                      # Tab fills in the highlighted (or first) match
+            self._complete_input()
 
         @kb.add("c-c")
         def _(event):
@@ -990,6 +1026,7 @@ class TUI:
             "who.you": f"{p['text']}", "who.lead": p["accent"], "who.claude": p["claude"],
             "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold", "stop": f"{p['bad']}", "ask": f"{p['accent']}",
             "code": f"{p['codex']}", "heading": f"{p['accent']}",
+            "pick": f"bg:{p['panel']} {p['text']}", "pick.on": f"bg:{p['accent']} {p['bg']} bold",
             "completion-menu": f"bg:{p['panel']} {p['text']}",
             "completion-menu.completion.current": f"bg:{p['accent']} {p['bg']}",
             "completion-menu.meta.completion": f"bg:{p['panel']} {p['dim']}",
@@ -1043,6 +1080,14 @@ class TUI:
     async def command(self, line):
         cmd, _, arg = line[1:].partition(" ")
         arg, e = arg.strip(), self.eng
+        names = [n for n, _, _ in COMMANDS] + ["exit"]
+        if cmd and cmd not in names:               # a clear abbreviation (/res) is that command
+            matches = [n for n in names if n.startswith(cmd)]
+            if len(matches) == 1:
+                cmd = matches[0]
+            elif matches:
+                self._add("sys", "\n_Did you mean " + " or ".join(f"/{m}" for m in matches) + "? Tab completes._\n")
+                return
         if cmd in ("quit", "exit"):
             self.app.exit()
         elif cmd in ("help", ""):
@@ -1108,34 +1153,88 @@ class TUI:
     def save_transcript(self):
         try:
             keep = [b for b in self.blocks if b.get("who") != "chart" and b.get("text")]
+            if not any(b.get("who") == "you" for b in keep):
+                return                            # nothing said yet: nothing worth resuming
             self.eng.notes_dir.mkdir(parents=True, exist_ok=True)
-            (self.eng.notes_dir / "transcript.json").write_text(json.dumps(keep[-400:]))
+            (self.eng.notes_dir / "transcript.json").write_text(json.dumps({"blocks": keep[-400:],
+                                                                            "plan": self.steps}))
         except Exception:
             pass
 
     def resume(self, arg):
+        """/resume: pick an earlier conversation with the arrow keys (or /resume N)."""
         from .commands import sessions
+        if self.busy and not self.busy.done():
+            self._add("sys", "\n_Finish or stop (Ctrl-C) the current job first._\n")
+            return
         found = [x for x in sessions(self.eng.project_root) if x["key"] != self.eng.session_key]
         if not found:
             self._add("sys", "\n_No earlier Claudex conversations in this project yet._\n")
             return
         arg = (arg or "").strip()
-        if not arg or not arg.isdigit() or not 1 <= int(arg) <= len(found):
-            rows = [f"**{n}.** {x['when']} · {x['requests']} request(s) · {x['first']}" for n, x in enumerate(found, 1)]
-            self._add("sys", "\n**Earlier conversations here** (type `/resume 1`, `/resume 2`…):\n" + "\n".join(rows) + "\n")
+        if arg.isdigit() and 1 <= int(arg) <= len(found):
+            asyncio.ensure_future(self._do_resume(found[int(arg) - 1]))
             return
-        pick = found[int(arg) - 1]
+        items = [(f"{x['when']}  ·  {x['requests']} request{'s' if x['requests'] != 1 else ''}  ·  {x['first']}", x)
+                 for x in found]
+        self.open_picker("Carry on an earlier conversation  (↑ ↓ to choose, Enter to open, Esc to cancel)", items,
+                         lambda x: asyncio.ensure_future(self._do_resume(x)))
+
+    async def _do_resume(self, pick):
         self.save_transcript()
-        self.eng.use_session(pick["key"])
+        await self.eng.switch_session(pick["key"])
         saved = self.eng.notes_dir / "transcript.json"
+        plan = []
         try:
-            blocks = json.loads(saved.read_text())
+            data = json.loads(saved.read_text())
+            blocks, plan = (data.get("blocks", []), data.get("plan", [])) if isinstance(data, dict) else (data, [])
         except Exception:
             blocks = _blocks_from_notes(self.eng.notes.read_text(errors="replace"))
-        self.blocks = blocks + [{"who": "sys", "text": f"\n_Carrying on the conversation from {pick['when']}. "
-                                                     "Claude and Codex get its notes, so they know where things stand._"}]
+        workers = self.eng._worker_ids()
+        who = " and ".join(sorted({"Claude" if n.startswith("claude") else "Codex" for n in workers}))
+        how = (f"{who} will pick up {'their' if ' and ' in who else 'its'} own earlier conversation when next asked"
+               if who else "Claude and Codex get its notes, so they know where things stand")
+        self.blocks = blocks + [{"who": "sys", "text": f"\n_Back in the conversation from {pick['when']}. {how}._"}]
+        self.steps = plan
         self.version += 1
         self.scroll_back = 0
+        self._refresh()
+
+    # ---------- a list to choose from with the arrow keys ----------
+    def _complete_input(self):
+        from prompt_toolkit.document import Document
+        buf = self.input.buffer
+        state = buf.complete_state
+        comp = state.current_completion if state and state.current_completion else None
+        if comp is None:
+            comps = list(self._completer.get_completions(Document(buf.text, len(buf.text)), None))
+            comp = comps[0] if comps else None
+        if comp is not None:
+            buf.text = buf.text[:len(buf.text) + comp.start_position] + comp.text
+            buf.cursor_position = len(buf.text)
+            buf.complete_state = None
+
+    def open_picker(self, title, items, on_pick):
+        self.picker = {"title": title, "items": items, "i": 0, "on_pick": on_pick}
+        self._refresh()
+
+    def picker_text(self):
+        pk = self.picker
+        if not pk:
+            return []
+        out = []
+        top = max(0, min(pk["i"] - 5, len(pk["items"]) - 12))
+        for n, (label, _) in enumerate(pk["items"][top:top + 12], top):
+            on = n == pk["i"]
+            out.append(("class:pick.on" if on else "class:pick", f"{'❯' if on else ' '} {n + 1:>2}. {label}\n"))
+        return out
+
+    def _pick(self, n=None):
+        pk, self.picker = self.picker, None
+        if pk:
+            idx = pk["i"] if n is None else n
+            if 0 <= idx < len(pk["items"]):
+                pk["on_pick"](pk["items"][idx][1])
         self._refresh()
 
     async def _usage(self, arg):
