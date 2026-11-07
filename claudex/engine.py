@@ -26,6 +26,8 @@ INSTRUCTIONS_LIMIT = 40000   # per file; house rules are never cut silently
 HANDOFF_LIMIT = 1500         # each worker's handover kept for the rest of the job and in the journal
 INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")  # Claude reads one, Codex the other; Claudex shows both to everyone
 DECISION_TAG = "DECISION NEEDED:"
+SNAP_HELP = ("Claudex needs git installed to compare files (`git --version`). Run `claudex doctor` to check, "
+             "or use `--checks off` to work without checks.")
 START_TIMEOUT = 120  # seconds for a worker to start, or to accept its settings
 SNAPSHOT_NOTE = ("(File lists and diffs come from Claudex's own snapshots of the working folder. Nothing has "
                  "been staged or committed in the user's git.)")
@@ -549,12 +551,6 @@ class Engine:
         self._task = asyncio.current_task()
         rules = load_rules(self.rules_path, self.project_root, self.models_file)
         self._rules = rules
-        if not self.dry_run and self.reviews_on and not gitsnap.is_repo(self.cwd):
-            self.ok = False
-            await self.ui.say("This folder isn't a git project, so Claudex can't see what the workers change and "
-                              "can't check their work. Run `git init` here first, or turn checks off "
-                              "(`--checks off`, or Checks: No checks in Agents of Empires).\n")
-            return "end_turn"
         self._prepare_memory()
         if not self.dry_run:
             usage.remember_project(self.project_root)   # so `claudex usage` can show who did what, and why
@@ -643,7 +639,8 @@ class Engine:
         turn_start = gitsnap.snapshot(self.project_root)
         if turn_start is None and self.reviews_on:
             self.ok = False
-            await self.ui.say("**Stopped before any work:** couldn't take a snapshot of the project files (git failed).\n")
+            await self.ui.say(f"**Stopped before any work:** couldn't take a snapshot of the project files "
+                              f"({gitsnap.LAST_ERROR or 'git failed'}). {SNAP_HELP}\n")
             return "end_turn"
         changed_any = False
         for i, s in enumerate(steps, 1):
@@ -830,8 +827,8 @@ class Engine:
             step_timeout = rules.get("limits", {}).get("step_timeout_min", 60) * 60
             before = before or gitsnap.snapshot(self.project_root)   # a handover keeps the step's first snapshot
             if before is None and self.reviews_on:
-                raise StepFailed("couldn't take a snapshot of the project files (git failed), so the work "
-                                 "couldn't be checked.")
+                raise StepFailed(f"couldn't take a snapshot of the project files ({gitsnap.LAST_ERROR or 'git failed'}), "
+                                 f"so the work couldn't be checked. {SNAP_HELP}")
             message = self._brief(i, n, s, text)
             for attempt in range(1, max_attempts + 1):
                 if self.cancelled:
@@ -897,7 +894,8 @@ class Engine:
                     raise StepFailed(f"the worker needs a decision from you. {reason}")
                 after = gitsnap.snapshot(self.project_root)
                 if after is None and self.reviews_on:
-                    raise StepFailed("couldn't take a snapshot of the project files after the step (git failed).")
+                    raise StepFailed(f"couldn't take a snapshot of the project files after the step "
+                                     f"({gitsnap.LAST_ERROR or 'git failed'}). {SNAP_HELP}")
                 diff, files, truncated = gitsnap.diff(self.project_root, before, after,
                                                       int(review.get("diff_limit", 60000)))
                 if getattr(c, "limit_hit", None) or reply_is_limit(out):   # the agent flagged a usage limit, or said so at the end

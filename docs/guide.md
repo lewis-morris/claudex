@@ -272,7 +272,8 @@ to restart it (`aoe acp stop <id>`: it comes straight back on your next message)
 |---|---|
 | "isn't signed in" / a check couldn't run | `claudex login`, then `claudex doctor` |
 | "claude-agent-acp not found" | `npm i -g @agentclientprotocol/claude-agent-acp` (same for `codex-acp`) |
-| "This folder isn't a git project" | `git init` (Claudex compares files to check every change), or `--checks off` |
+| "couldn't take a snapshot of the project files" | Claudex keeps its own snapshots in `.claudex/snapshots.git`, so any folder works (git project or not, with or without commits). This only happens if `git` itself isn't installed or can't write to `.claudex`; the message says git's reason. `claudex doctor` checks |
+| a job stopped and you've fixed the cause | `/retry` sends your last request again |
 | a model name stopped working | `claudex doctor` shows which; fix it with `claudex models --edit` |
 | one agent hit its usage limit | nothing to do: the other one takes over, and Claudex says when the limit resets |
 | the chat says another job is running here | only one Claudex job works in a project at a time; it waits its turn |

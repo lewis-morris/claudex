@@ -196,7 +196,7 @@ async def chat(eng):
     skills = load_skills()
     print(f"{MAGENTA}{fun.BANNER}{RESET}{DIM}   {fun.pick(fun.HELLO)}\n   {eng.cwd}\n"
           f"   Type / for commands and skills, @claude or @codex for one agent, /quit to leave.{RESET}\n")
-    session = None
+    session, last = None, None
     if sys.stdin.isatty():
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
@@ -219,6 +219,13 @@ async def chat(eng):
             continue
         if line == "?":
             line = "/help"
+        if line == "/retry":
+            if not last:
+                print(f"{DIM}Nothing to retry yet.{RESET}")
+                continue
+            line = last
+        if not line.startswith("/"):
+            last = line
         if line.startswith("/"):
             skill = expand_skill(line, skills)
             if skill:

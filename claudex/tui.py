@@ -342,7 +342,11 @@ class TUI:
         self._refresh()
 
     async def say(self, text):
-        self._add("sys", text)
+        if "**Stopped" in text or "**Final check couldn't run" in text:
+            self._add("stop", text.strip("\n") + "\n_Type /retry to send it again, or /doctor to check the setup._")
+            self.blocks.append({"who": "sys", "text": ""})    # anything after it starts a new block
+        else:
+            self._add("sys", text)
 
     async def plan(self, entries):
         self.steps = [dict(e) for e in entries]
@@ -674,9 +678,11 @@ class TUI:
             if who == "chart":           # pre-coloured output (the usage chart)
                 frags.extend(b["frags"] + [("", "\n\n")])
                 continue
-            if who != "sys":
+            if who == "stop":
+                frags.append(("class:stop bold", "■ Stopped\n"))
+            elif who != "sys":
                 frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}\n"))
-            frags.extend(_md(b["text"].strip("\n"), "class:body" if who != "sys" else "class:sys"))
+            frags.extend(_md(b["text"].strip("\n"), {"sys": "class:sys", "stop": "class:stop"}.get(who, "class:body")))
             frags.append(("", "\n\n"))
         if not frags:
             frags = [("class:dim", "  Ask for anything. Type / for commands and skills.\n")]
@@ -808,7 +814,7 @@ class TUI:
             "frame.border": p["edge"], "input": f"bg:{p['panel']} {p['text']}",
             "dim": p["dim"], "accent": p["accent"], "good": p["good"], "body": p["text"], "sys": p["dim"],
             "who.you": f"{p['text']}", "who.lead": p["accent"], "who.claude": p["claude"],
-            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold",
+            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold", "stop": f"{p['bad']}",
             "completion-menu": f"bg:{p['panel']} {p['text']}",
             "completion-menu.completion.current": f"bg:{p['accent']} {p['bg']}",
             "completion-menu.meta.completion": f"bg:{p['panel']} {p['dim']}",
@@ -827,6 +833,12 @@ class TUI:
             self._add("sys", "\n_Still working on the last one. Ctrl-C stops it._\n")
             return False
         self.scroll_back = 0
+        if line.strip() == "/retry":
+            if not getattr(self, "last_request", None):
+                self._add("sys", "\n_Nothing to retry yet._\n")
+                return False
+            line = self.last_request
+            self._add("sys", "\n_Trying again…_\n")
         if line.startswith("/"):
             skill = expand_skill(line, self.skills)
             if skill:
@@ -834,6 +846,7 @@ class TUI:
             else:
                 self.cmd_task = asyncio.ensure_future(self.command(line))
                 return False
+        self.last_request = line
         self.blocks.append({"who": "you", "text": line})
         self.version += 1
         self.busy = asyncio.ensure_future(self.run(line))

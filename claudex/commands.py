@@ -14,6 +14,7 @@ COMMANDS = [
     ("effort", "auto|low|medium|high|xhigh", "force one reasoning level for every step"),
     ("mode", "ask|auto|unrestricted", "ask: you approve everything · auto: rules + gatekeeper · unrestricted"),
     ("checks", "full|reviews|off", "second opinions + reviews / reviews only / none"),
+    ("retry", "", "send your last request again (after a stop, or a fix)"),
     ("dry", "", "plan only: show who'd do what, change nothing (toggle)"),
     ("anim", "playful|calm|off big|small|tiny", "how lively and how big the monkeys are (F2 steps through all nine)"),
     ("status", "", "current settings and where the notes are"),
@@ -28,7 +29,7 @@ COMMANDS = [
     ("usage", "web", "tokens across Claude and Codex as a coloured chart; /usage web opens a live page"),
     ("quit", "", "leave Claudex"),
 ]
-TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim"}
+TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry"}
 
 
 def _describe(skill_md):

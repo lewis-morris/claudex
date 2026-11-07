@@ -84,8 +84,21 @@ def test_snapshot_unchanged_and_truncation(repo):
     assert files == ["a.py"] and cut
 
 
-def test_snapshot_outside_git(tmp_path):
-    assert gitsnap.snapshot(str(tmp_path)) is None
+def test_snapshot_outside_git_and_in_an_empty_repo(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    (plain / "a.txt").write_text("1")
+    a = gitsnap.snapshot(str(plain))                      # not a git project at all: still works
+    (plain / "a.txt").write_text("2")
+    assert a and gitsnap.changed_files(str(plain), a, gitsnap.snapshot(str(plain))) == ["a.txt"]
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=empty, check=True)  # a brand-new repo with no commits (penPost)
+    (empty / "page.html").write_text("<p/>")
+    b = gitsnap.snapshot(str(empty))
+    (empty / "page.html").write_text("<p>hi</p>")
+    assert b and gitsnap.changed_files(str(empty), b, gitsnap.snapshot(str(empty))) == ["page.html"]
+    assert subprocess.run(["git", "status", "--porcelain"], cwd=empty, capture_output=True, text=True).stdout.count("??") == 1
 
 
 # ---------- locks ----------
@@ -377,10 +390,14 @@ def test_refusal_is_a_failure(job):
     assert not e.ok and "refused" in ui.all()
 
 
-def test_outside_git_refuses_unless_checks_off(job, tmp_path_factory):
-    plain = tmp_path_factory.mktemp("plain")   # not inside the test repo
+def test_works_outside_git_too(job, tmp_path_factory):
+    repo, calls, answers = job
+    plain = tmp_path_factory.mktemp("plain")   # not inside the test repo, not a git project
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "x = 1\n", "made a.py")]
     e, ui, stop = run(plain)
-    assert not e.ok and "isn't a git project" in ui.all() and FakeChild.started == []
+    assert e.ok and [c for c in calls if c[0] == "review"] and "a.py" in [c for c in calls if c[0] == "review"][0][4]
 
 
 def test_dry_run_leaves_no_trace(job):

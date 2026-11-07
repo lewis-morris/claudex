@@ -89,7 +89,7 @@ Python; it tells you how if it's missing).
 ## Use
 
 ```bash
-cd your-project            # a git repo: Claudex snapshots files to see and check every change
+cd your-project            # any folder: Claudex snapshots files itself to see and check every change
 claudex                    # full screen
 claudex -p "add VAT to the quote total, with tests, then show it on the quote page"
 claudex --dry-run -p "…"   # just show the plan and who'd do what
@@ -314,7 +314,9 @@ Claude, Codex and the connectors.
 
 - **Reviewers, the lead and the second opinion are read-only**, with your MCP servers, hooks and Chrome
   switched off.
-- **Snapshots never touch your git index**: Claudex compares files using a private temporary index.
+- **Snapshots never touch your git**: Claudex keeps its before-and-after snapshots in its own store
+  (`.claudex/snapshots.git`), so it works in any folder (new repo, no commits, or no git at all) and never
+  writes into your project's git.
 - **It never commits or pushes** unless you ask a worker to.
 - **If a check can't run** (signed out, timed out), the job stops rather than pretending it passed. If it
   can't run because of a usage limit, the other side's strongest model checks instead, flagged as not
