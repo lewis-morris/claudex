@@ -1,0 +1,17 @@
+title = "Clean a messy customer CSV"
+check = "python3 -m pytest -q --tb=line"
+brief = """
+data/customers.csv is a messy export (columns: name, email, phone, signed_up). Write clean.py with:
+
+clean_rows(rows) -> list of dicts, taking and returning dicts with keys name, email, phone, signed_up:
+- trim spaces around every value; name in Title Case (e.g. "  aNNa smith " -> "Anna Smith")
+- email lower-cased; drop any row with no email or an email without exactly one "@"
+- phone as UK international: "07700 900123", "+44 7700 900123", "0044 7700-900-123", "447700900123" all become
+  "+447700900123"; anything that isn't a UK mobile (07… with 11 digits, or the +44/0044/44 forms of it) becomes ""
+- signed_up as YYYY-MM-DD; accept "2026-03-01", "01/03/2026" (day first) and "1 Mar 2026"; unreadable -> drop the row
+- duplicates by email: keep only the one with the latest signed_up
+- return the rows sorted by email
+
+Also a command line: `python clean.py in.csv out.csv` writes the cleaned CSV (same columns, with header).
+Add tests in test_clean.py and run them before you finish. Don't ask questions: decide sensibly.
+"""

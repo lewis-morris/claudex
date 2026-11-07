@@ -1,0 +1,13 @@
+title = "Quote total with VAT, and a quote page"
+check = "python3 -m pytest -q --tb=line"
+brief = """
+This small Python project has calc.py with subtotal(lines), where lines is a list of (qty, unit_price_pence).
+
+1. In calc.py add quote_total(lines) returning a dict {"subtotal": int, "vat": int, "total": int}, all in whole
+   pence. VAT is 20% of the subtotal, rounded half-up to the nearest penny (never use floats for money).
+   total = subtotal + vat. An empty list gives all zeros. Negative quantities or prices raise ValueError.
+2. Add tests for it in test_calc.py.
+3. Make quote.html: a small, nicely styled standalone page (no external files) showing an example quote for
+   lines [(2, 150), (1, 99)] with the subtotal, VAT and total as pounds, e.g. £3.99, £0.80, £4.79.
+Run the tests before you finish. Don't ask questions: decide sensibly and get it done.
+"""

@@ -10,6 +10,12 @@ claudex doctor [--live]      check logins, versions, connectors and every model 
 claudex rules [--edit]       show (or edit) who does what
 claudex log [-n N]           recent steps in this project
 claudex update               update Claude, Codex and both connectors, then run doctor
+claudex init                 set a project up: one house-rules file for both agents, memory, first map
+claudex shared               what Claude and Codex share (house rules, skills, connectors) and what they don't
+claudex memory [--files]     this project's Claudex memory
+claudex permissions [--edit] the permission rules in force and every recent decision
+claudex usage [--web]        tokens across both agents as a coloured chart (--web: a live page, --lan for your network)
+claudex bench                race Claude, Codex and Claudex on small projects (tests, review score, time, tokens)
 claudex demo                 preview the full-screen look (1 2 3 colours, q quits)"""
 
 
@@ -22,8 +28,12 @@ def chat_parser():
     ap.add_argument("--cwd", default=".", help="project folder (default: here)")
     ap.add_argument("--route", default="auto", choices=["auto", "claude", "codex"],
                     help="who does the work: auto (Claudex decides), or one agent for everything")
-    ap.add_argument("--mode", default="auto", choices=["default", "acceptEdits", "auto", "bypassPermissions"],
-                    help="how much workers may do without asking (default: auto)")
+    ap.add_argument("--mode", default="auto",
+                    choices=["ask", "auto", "unrestricted", "default", "acceptEdits", "bypassPermissions"],
+                    help="ask: you approve everything · auto: Claudex's rules + a gatekeeper decide, you get "
+                         "the hard calls (default) · unrestricted: nothing asks (old names still work)")
+    ap.add_argument("--unattended", action="store_true",
+                    help="nobody's watching: anything that would ask you is refused instead")
     ap.add_argument("--effort", default="auto", choices=["auto", "low", "medium", "high", "xhigh"],
                     help="force one reasoning level for every step (default: per step)")
     ap.add_argument("--checks", default="full", choices=["full", "reviews", "off"],
@@ -46,7 +56,7 @@ def settings_from(args):
         checks = "off"
     return {"route": args.route, "mode": args.mode, "effort": args.effort, "checks": checks,
             "lead_model": args.lead_model, "lead_effort": args.lead_effort, "rules": args.rules,
-            "dry_run": args.dry_run}
+            "dry_run": args.dry_run, "unattended": args.unattended}
 
 
 def main():
@@ -54,7 +64,8 @@ def main():
     if argv and argv[0] == "demo":
         from . import ui_demo
         sys.exit(ui_demo.main())
-    if argv and argv[0] in ("doctor", "rules", "log", "update", "login"):
+    if argv and argv[0] in ("doctor", "rules", "log", "update", "login", "init", "shared", "memory",
+                            "permissions", "usage", "bench"):
         from . import tools
         sys.exit(tools.main(argv))
     args, _unknown = chat_parser().parse_known_args(argv)  # AoE may append agent flags; ignore them

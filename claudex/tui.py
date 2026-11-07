@@ -671,6 +671,9 @@ class TUI:
         frags = []
         for b in self.blocks:
             who = b["who"]
+            if who == "chart":           # pre-coloured output (the usage chart)
+                frags.extend(b["frags"] + [("", "\n\n")])
+                continue
             if who != "sys":
                 frags.append((f"class:who.{who} bold", f"● {self.NAMES[who]}\n"))
             frags.extend(_md(b["text"].strip("\n"), "class:body" if who != "sys" else "class:sys"))
@@ -716,7 +719,8 @@ class TUI:
                  + (" · PLAN ONLY" if e.dry_run else "")
                  + f" · F2 monkeys {self.look_name()} · F3 {LAYOUT_NAMES[self.prefs['layout']]}"
                  + f" · F4 {self.prefs['palette']} ")
-        return [("class:chip", left), ("class:status", right)]
+        warn = [("class:danger", " UNRESTRICTED: nothing asks ")] if e.mode == "unrestricted" else []
+        return [("class:chip", left)] + warn + [("class:status", right)]
 
     # ---------- layout ----------
     def build(self):
@@ -804,7 +808,7 @@ class TUI:
             "frame.border": p["edge"], "input": f"bg:{p['panel']} {p['text']}",
             "dim": p["dim"], "accent": p["accent"], "good": p["good"], "body": p["text"], "sys": p["dim"],
             "who.you": f"{p['text']}", "who.lead": p["accent"], "who.claude": p["claude"],
-            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold",
+            "who.codex": p["codex"], "status": f"bg:{p['bg']} {p['dim']}", "chip": f"bg:{p['accent']} {p['bg']} bold", "danger": f"bg:{p['bad']} {p['bg']} bold",
             "completion-menu": f"bg:{p['panel']} {p['text']}",
             "completion-menu.completion.current": f"bg:{p['accent']} {p['bg']}",
             "completion-menu.meta.completion": f"bg:{p['panel']} {p['dim']}",
@@ -880,9 +884,13 @@ class TUI:
         elif cmd == "status":
             self._add("sys", f"\nRouting {ROUTES[e.route]} · effort {e.effort} · mode {MODES[e.mode][0]} · "
                              f"checks {CHECKS[e.checks]}\nNotes: {e.notes}\n")
-        elif cmd in ("rules", "doctor", "log"):
+        elif cmd == "usage":
+            await self._usage(arg)
+        elif cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init"):
             self._add("sys", f"\n_Running /{cmd}…_\n")
-            args, env = self_command(cmd, *(["--cwd", e.cwd] if cmd == "log" else []), rules=e.rules_path)
+            extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
+                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"]}.get(cmd, [])
+            args, env = self_command(cmd, *extra, *(arg.split() if cmd == "memory" else []), rules=e.rules_path)
             proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT, env=env,
                                                         start_new_session=True)
@@ -897,13 +905,37 @@ class TUI:
                 self._add("sys", f"\n_/{cmd} stopped._\n")
                 return
             self._add("sys", "\n" + out.decode(errors="replace") + "\n")
-        elif cmd == "memory":
-            for title, path in (("Project map", e.map), ("Past decisions", e.decisions),
-                                ("Recent jobs", e.journal)):
-                body = path.read_text()[-3000:] if path.exists() else "_(nothing yet)_"
-                self._add("sys", f"\n**{title}**\n{body}\n")
         else:
             self._add("sys", "\n_No such command or skill. Type / to see them._\n")
+        self._refresh()
+
+    async def _usage(self, arg):
+        from . import usage
+        if arg.strip() == "web":
+            if not getattr(self, "_web", None):
+                import threading
+                self._web = threading.Thread(target=usage.serve, kwargs={"open_browser": True}, daemon=True)
+                self._web.start()
+            self._add("sys", "\n_Usage page: http://localhost:8765/ (opening in your browser; it updates live)._\n")
+            return
+        self._add("sys", "\n_Counting tokens across Claude and Codex…_\n")
+        s = await asyncio.get_running_loop().run_in_executor(None, usage.summary, 14, None)
+        p, peak = self.p, max([d["claude"] + d["codex"] for d in s["by_day"]] + [1])
+        frags = [("class:body bold", "Usage, last 14 days   "), (f"fg:{p['claude']}", "█ Claude  "),
+                 (f"fg:{p['codex']}", "█ Codex\n")]
+        for d in s["by_day"]:
+            c, x = round(d["claude"] / peak * 46), round(d["codex"] / peak * 46)
+            frags += [("class:dim", d["day"][5:] + " "), (f"fg:{p['claude']}", "█" * c), (f"fg:{p['codex']}", "█" * x),
+                      ("class:dim", f" {usage.human(d['claude'] + d['codex'])}\n")]
+        t = s["totals"]
+        for a in ("claude", "codex"):
+            frags.append((f"fg:{p[a]}", f"\n{a.title():<7} {usage.human(t[a]['fresh'] + t[a]['output'])} tokens "
+                                         f"({usage.human(t[a]['output'])} written, {usage.human(t[a]['cached'])} cached)"))
+        for r in s["by_role"]:
+            frags.append(("class:dim", f"\n  Claudex {r['role']}: Claude {usage.human(r['claude'])} · Codex {usage.human(r['codex'])}"))
+        frags.append(("class:dim", "\n\n/usage web opens a live page with more."))
+        self.blocks.append({"who": "chart", "frags": frags, "text": ""})
+        self.version += 1
         self._refresh()
 
     async def animate(self):

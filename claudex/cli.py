@@ -250,6 +250,8 @@ async def chat(eng):
 
 
 async def run(args, settings):
+    if args.print and not sys.stdin.isatty():
+        settings = dict(settings, unattended=True)       # a script: nobody to ask
     eng = Engine(os.path.abspath(args.cwd), TerminalUI(), settings=settings)
     try:
         if args.print:

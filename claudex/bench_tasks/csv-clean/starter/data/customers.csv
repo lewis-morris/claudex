@@ -1,0 +1,8 @@
+name,email,phone,signed_up
+  aNNa smith ,Anna@Example.com,07700 900123,2026-03-01
+Bob Jones,bob@example.com,+44 7700 900456,01/03/2026
+anna smith,anna@example.com ,0044 7700-900-123,1 Apr 2026
+Carl,,07700900789,2026-01-05
+dee,dee@@example.com,07700900111,2026-01-05
+Eve Black,eve@example.com,020 7946 0000,5 Feb 2026
+Finn,finn@example.com,447700900222,not a date

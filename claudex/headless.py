@@ -8,6 +8,10 @@ import json
 import os
 import tempfile
 
+import re
+import time
+
+from . import usage as usage_log
 from .limits import error_is_limit
 from .paths import tool_env
 
@@ -60,13 +64,19 @@ def codex_cmd(model, effort, schema_path, out_path, cwd):
             "--output-schema", schema_path, "-o", out_path, "-C", cwd, "-"]
 
 
-async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_files=True, budget=3.0):
+async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_files=True, budget=3.0, role=None):
     tools = "Read,Grep,Glob" if read_files else ""
+    started = time.time()
     code, out, err = await _run(claude_cmd(model, effort, schema, tools, budget), cwd, prompt, timeout)
     try:
         data = json.loads(out)
     except Exception:
         raise HeadlessError(f"claude exited {code}: {(err or out)[-600:]}")
+    u = data.get("usage") or {}
+    usage_log.record("claude", model, role or "one-shot", cwd,
+                     fresh=(u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
+                     cached=u.get("cache_read_input_tokens") or 0, output=u.get("output_tokens") or 0,
+                     cost=data.get("total_cost_usd"), secs=round(time.time() - started, 1))
     if code != 0 or data.get("is_error") or "structured_output" not in data:
         # keep every bit of explanation: errors[] often holds the real reason (e.g. a usage limit)
         parts = [str(data.get("result") or ""), str(data.get("subtype") or "")]
@@ -76,12 +86,17 @@ async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_file
     return data["structured_output"]
 
 
-async def codex_json(cwd, prompt, schema, model, effort, timeout=900):
+async def codex_json(cwd, prompt, schema, model, effort, timeout=900, role=None):
     with tempfile.TemporaryDirectory(prefix="claudex-") as d:
         sp, op = os.path.join(d, "schema.json"), os.path.join(d, "out.json")
         with open(sp, "w") as f:
             json.dump(schema, f)
+        started = time.time()
         code, out, err = await _run(codex_cmd(model, effort, sp, op, cwd), cwd, prompt, timeout)
+        used = re.findall(r"tokens used\s*\n?\s*([\d,]+)", out + "\n" + err)
+        if used:
+            usage_log.record("codex", model, role or "one-shot", cwd, total=int(used[-1].replace(",", "")),
+                             secs=round(time.time() - started, 1))
         if code != 0:   # never trust an answer from a run that failed
             raise HeadlessError(f"codex exited {code}: {(err or out)[-800:]}")
         try:
@@ -91,11 +106,11 @@ async def codex_json(cwd, prompt, schema, model, effort, timeout=900):
             raise HeadlessError(f"codex gave no answer: {(err or out)[-800:]}")
 
 
-async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True):
+async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None):
     schema = strict(schema)
     if agent == "codex":
-        return await codex_json(cwd, prompt, schema, model, effort, timeout)
-    return await claude_json(cwd, prompt, schema, model, effort, timeout, read_files)
+        return await codex_json(cwd, prompt, schema, model, effort, timeout, role=role)
+    return await claude_json(cwd, prompt, schema, model, effort, timeout, read_files, role=role)
 
 
 def strict(schema):

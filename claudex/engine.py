@@ -11,7 +11,7 @@ import time
 import tomllib
 import uuid
 
-from . import fun, gitsnap, headless
+from . import fun, gitsnap, headless, permissions
 from .child import Child
 from .ladder import next_rung
 from .locks import CHROME_LOCK, Lock
@@ -35,11 +35,18 @@ EFFORTS = ["auto", "low", "medium", "high", "xhigh"]
 CHECKS = {"full": "Second opinions + reviews", "reviews": "Reviews only", "off": "No checks"}
 # Claudex mode -> each worker's own permission mode.
 MODES = {
-    "default": ("Ask first", {"claude": "default", "codex": "read-only"}),
-    "acceptEdits": ("Accept edits", {"claude": "acceptEdits", "codex": "workspace-write"}),
-    "auto": ("Auto", {"claude": "auto", "codex": "agent"}),
-    "bypassPermissions": ("Bypass permissions", {"claude": "bypassPermissions", "codex": "agent-full-access"}),
+    # Claudex mode -> (label, each worker's own mode). In "ask" and "auto" the workers ask before acting and
+    # Claudex answers (you, or its rules + gatekeeper). In "unrestricted" they don't ask at all.
+    "ask": ("Ask me", {"claude": "default", "codex": "read-only"}),
+    "auto": ("Auto (Claudex rules + gatekeeper)", {"claude": "default", "codex": "workspace-write"}),
+    "unrestricted": ("Unrestricted", {"claude": "bypassPermissions", "codex": "agent-full-access"}),
 }
+LEGACY_MODES = {"default": "ask", "acceptEdits": "auto", "bypassPermissions": "unrestricted"}
+
+
+def norm_mode(mode):
+    mode = LEGACY_MODES.get(mode, mode)
+    return mode if mode in MODES else "auto"
 
 _STEP = {"type": "object", "properties": {
     "title": {"type": "string"}, "agent": {"enum": ["claude", "codex"]},
@@ -63,8 +70,21 @@ FINAL_SCHEMA = {"type": "object", "properties": {
 MAP_SCHEMA = {"type": "object", "properties": {"map": {"type": "string"}}}
 
 
-def load_rules(path=None):
-    return tomllib.loads(pathlib.Path(path or rules_file()).read_text())
+def _merge(base_, over):
+    out = dict(base_)
+    for k, v in over.items():
+        out[k] = _merge(out[k], v) if isinstance(v, dict) and isinstance(out.get(k), dict) else v
+    return out
+
+
+def load_rules(path=None, project_root=None):
+    """Your rules (or the defaults), with the project's own .claudex/rules.toml layered on top if it has one."""
+    rules = tomllib.loads(pathlib.Path(path or rules_file()).read_text())
+    if project_root:
+        own = pathlib.Path(project_root) / ".claudex" / "rules.toml"
+        if own.is_file():
+            rules = _merge(rules, tomllib.loads(own.read_text()))
+    return rules
 
 
 def catalog_models():
@@ -126,7 +146,9 @@ class Engine:
         self.rules_path = s.get("rules")
         self.route = s.get("route", "auto")
         self.effort = s.get("effort", "auto")
-        self.mode = s.get("mode", "auto")
+        self.mode = norm_mode(s.get("mode", "auto"))
+        self.unattended = bool(s.get("unattended"))   # nobody to ask: "ask the human" becomes "no"
+        self._rules = None
         self.checks = s.get("checks", "full")
         self.dry_run = s.get("dry_run", False)
         self.lead_model, self.lead_effort = s.get("lead_model"), s.get("lead_effort")
@@ -296,6 +318,7 @@ class Engine:
         if c and c.proc and c.proc.returncode is None:
             return c
         c = Child(name, rules["agents"][name], self.cwd, self.ui, self.mcp_servers)
+        c.decide = lambda params, agent=base(name): self.decide_permission(agent, params)
         try:
             await asyncio.wait_for(c.start(), START_TIMEOUT)
         except BaseException:
@@ -331,10 +354,71 @@ class Engine:
         # from inside the job itself the flag is enough: it's checked before every next move
 
     # ---------- the lead ----------
+    # ---------- permissions ----------
+    async def decide_permission(self, agent, params):
+        """A worker wants to do something. Claudex's rules, then the gatekeeper, then you (or "no" if you're away)."""
+        rules = self._rules or load_rules(self.rules_path, self.project_root)
+        tc = params.get("toolCall") or {}
+        opts = params.get("options") or []
+        kind, command, paths, title = permissions.describe(tc, self.project_root)
+        what = " ".join((command or ", ".join(paths) or title or kind).split())   # one line, for messages and the log
+        log = self.root / "permissions.jsonl"
+
+        def answer(decision, by, why):
+            permissions.log_decision(log, agent=agent, kind=kind, what=what[:300], decision=decision, by=by,
+                                     why=why[:300], mode=self.mode, session=self.session_key)
+            return permissions.pick_option(opts, decision)
+
+        async def human(why):
+            if self.unattended:
+                await self.ui.say(f"\n_🛡 Needed your OK, but nobody's here to ask, so it was refused: "
+                                  f"{agent.title()} wanted to {kind} {what[:120]} ({why})._\n")
+                return answer("deny", "nobody to ask", why)
+            choice = await self.ui.permission(params)
+            picked = ((choice or {}).get("outcome") or {}).get("optionId")
+            kind_of = next((o.get("kind", "") for o in opts if o.get("optionId") == picked), "")
+            permissions.log_decision(log, agent=agent, kind=kind, what=what[:300],
+                                     decision="allow" if kind_of.startswith("allow") else "deny", by="you",
+                                     why=why[:300], mode=self.mode, session=self.session_key)
+            return choice
+
+        if self.mode == "ask":
+            return await human("you chose to approve everything yourself")
+        decision, pattern = permissions.rule_decision(rules, kind, command, paths, self.project_root)
+        if decision in ("allow", "deny"):
+            if decision == "deny":
+                await self.ui.say(f"\n_🛡 Claudex refused: {agent.title()} wanted to {kind} {what[:120]} "
+                                  f"(rule `{decision}: {pattern}`)._\n")
+            return answer(decision, "rule", pattern) or await human("the agent offered no way to say yes")
+        if decision == "ask":
+            return await human(f"rule `ask: {pattern}`")
+        g = rules.get("permissions", {}).get("gatekeeper") or {}
+        if not g:
+            return await human("no rule covers it")
+        prompt = permissions.gate_prompt(kind, command, paths, title, (self._job or {}).get("request", ""),
+                                         "\n".join(permissions.summary_lines(rules)), self.project_root)
+        try:
+            v = await headless.ask(g.get("agent", "claude"), self.cwd, prompt, permissions.GATE_SCHEMA,
+                                   g.get("model", "sonnet"), g.get("effort", "low"), 120, read_files=False,
+                                   role="gatekeeper")
+        except Exception as e:
+            return await human(f"the gatekeeper couldn't decide ({str(e)[:80]})")
+        if v["decision"] == "ask":
+            return await human(f"gatekeeper: {v['reason']}")
+        mark = "allowed" if v["decision"] == "allow" else "refused"
+        await self.ui.say(f"\n_🛡 Gatekeeper {mark}: {agent.title()} wants to {kind} {what[:120]}. {v['reason']}_\n")
+        return answer(v["decision"], "gatekeeper", v["reason"]) or await human("the agent offered no way to say yes")
+
     # ---------- usage limits ----------
-    def _mark_limited(self, agent, said):
+    def _mark_limited(self, agent, said, resets_at=None):
         agent = base(agent)
-        self.limited[agent] = (time.time(), reset_hint(said))
+        hint = reset_hint(said)
+        if resets_at:
+            try:
+                hint = datetime.datetime.fromtimestamp(float(resets_at)).strftime("at %H:%M on %a %d %b")
+            except Exception:
+                pass
+        self.limited[agent] = (time.time(), hint)
         self._act(agent, "limited")
         self._log(kind="usage_limit", agent=agent, said=(said or "")[:300])
 
@@ -350,7 +434,7 @@ class Engine:
     def _limits_summary(self):
         return "; ".join(self._limit_note(a) for a in self.limited) or "no agent available"
 
-    async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True):
+    async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True, role=None):
         """A read-only call to one agent. If it's at its usage limit, the other agent's strongest checker
         answers instead. Returns (agent, model, effort, answer). Other errors are raised as they are."""
         alt = other(agent)
@@ -359,7 +443,7 @@ class Engine:
             if self._is_limited(a, rules):
                 continue
             try:
-                return a, m, e, await headless.ask(a, self.cwd, prompt, schema, m, e, timeout, read_files)
+                return a, m, e, await headless.ask(a, self.cwd, prompt, schema, m, e, timeout, read_files, role=role)
             except Exception as ex:
                 limit = getattr(ex, "limit", None)
                 if not (limit if limit is not None else error_is_limit(str(ex))):
@@ -416,7 +500,7 @@ class Engine:
             prompt += "\nLeave concern_responses empty.\n"
         agent, model, effort = self._lead(rules)
         timeout = rules.get("limits", {}).get("plan_timeout_min", 10) * 60
-        a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout)
+        a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout, role="lead")
         self._planned_by = a
         return answer
 
@@ -439,14 +523,16 @@ class Engine:
             "Agree unless there is a concrete problem; don't nitpick wording or step order.\n\n"
             f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(plan, indent=1)}\n\n{self._memory_block()}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
-        a, m, e, op = await self._ask(who, r["model"], r["effort"], prompt, OPINION_SCHEMA, rules, timeout)
+        a, m, e, op = await self._ask(who, r["model"], r["effort"], prompt, OPINION_SCHEMA, rules, timeout,
+                                      role="second opinion")
         return a, {"model": m, "effort": e, "independent": a != planner}, op
 
     # ---------- one message ----------
     async def turn(self, text):
         self.cancelled, self.ok = False, True
         self._task = asyncio.current_task()
-        rules = load_rules(self.rules_path)
+        rules = load_rules(self.rules_path, self.project_root)
+        self._rules = rules
         if not self.dry_run and self.reviews_on and not gitsnap.is_repo(self.cwd):
             self.ok = False
             await self.ui.say("This folder isn't a git project, so Claudex can't see what the workers change and "
@@ -757,7 +843,8 @@ class Engine:
                 except Exception as e:
                     partial = "".join(getattr(c, "_text", []) or []).strip()   # what it had said before failing
                     await self._stop_child(name)
-                    if error_is_limit(str(e)):
+                    data = getattr(e, "data", None)
+                    if error_is_limit(str(e)) or (isinstance(data, dict) and data.get("errorKind") == "rate_limit"):
                         said = (partial + "\n\n" if partial else "") + f"[stopped: {e}]"
                         self._append(self.notes, f"## Step {i}: {s['title']} ({agent} {model} {effort}, attempt "
                                                  f"{attempt}): stopped at its usage limit\n{said}\n\n")
@@ -795,9 +882,9 @@ class Engine:
                     raise StepFailed("couldn't take a snapshot of the project files after the step (git failed).")
                 diff, files, truncated = gitsnap.diff(self.project_root, before, after,
                                                       int(review.get("diff_limit", 60000)))
-                if reply_is_limit(out):      # it stopped with a "you've hit your limit" notice
+                if getattr(c, "limit_hit", None) or reply_is_limit(out):   # the agent flagged a usage limit, or said so at the end
                     self._log(**row, verdict="usage_limit", files=files)
-                    self._mark_limited(agent, out)
+                    self._mark_limited(agent, out, (getattr(c, "limit_hit", None) or {}).get("resetsAt"))
                     raise WorkerLimited(agent, out, before)
                 if not files:
                     self._log(**row, verdict="no_changes")
@@ -844,7 +931,8 @@ class Engine:
                if truncated else "") + f"DIFF:\n{diff}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         try:
-            used, m, ef, v = await self._ask(who, r["model"], r["effort"], prompt, REVIEW_SCHEMA, rules, timeout)
+            used, m, ef, v = await self._ask(who, r["model"], r["effort"], prompt, REVIEW_SCHEMA, rules, timeout,
+                                              role="reviewer")
             if used != who:
                 v = dict(v, summary=f"(Checked by {used.title()} {m} {ef}, the same side that did the work, "
                                     f"because {who.title()} is at its usage limit.) " + v["summary"])
@@ -886,7 +974,7 @@ class Engine:
             + f"DIFF:\n{diff}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         try:
-            v = (await self._ask(agent, model, effort, prompt, FINAL_SCHEMA, rules, timeout))[3]
+            v = (await self._ask(agent, model, effort, prompt, FINAL_SCHEMA, rules, timeout, role="final check"))[3]
         except Exception as e:
             self.ok = self.ok and self._carry_on(rules)
             await self.ui.say(f"\n**Final check couldn't run:** {e}\n\n")
@@ -915,7 +1003,7 @@ class Engine:
             f"FILES CHANGED: {', '.join(files)}\n\n"
             f"SHARED PROJECT MEMORY (keep anything here that future agents need in the map):\n{self._memory_block()}\n")
         try:
-            v = (await self._ask(m["agent"], m["model"], m["effort"], prompt, MAP_SCHEMA, rules, 600))[3]
+            v = (await self._ask(m["agent"], m["model"], m["effort"], prompt, MAP_SCHEMA, rules, 600, role="map"))[3]
         except Exception as e:
             await self.ui.say(f"_(Project map not updated: {e}.)_\n")
             return

@@ -32,7 +32,8 @@ NOTICE_WINDOW = 400   # a stop notice sits at the end of what the agent said
 
 
 def error_is_limit(text):
-    return bool(ERROR_RE.search(text or ""))
+    t = text or ""
+    return bool(ERROR_RE.search(t)) or '"errorKind":"rate_limit"' in t.replace(" ", "")
 
 
 _LEAD_IN = re.compile(r"^[^\w`'\"]*(?:(?:api )?error:?\s*|warning:?\s*)?", re.I)   # ⚠ ✗ ⎿ "Error:" …

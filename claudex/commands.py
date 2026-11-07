@@ -12,7 +12,7 @@ COMMANDS = [
     ("claude", "", "send everything to Claude"),
     ("codex", "", "send everything to Codex"),
     ("effort", "auto|low|medium|high|xhigh", "force one reasoning level for every step"),
-    ("mode", "default|acceptEdits|auto|bypassPermissions", "what workers may do without asking"),
+    ("mode", "ask|auto|unrestricted", "ask: you approve everything · auto: rules + gatekeeper · unrestricted"),
     ("checks", "full|reviews|off", "second opinions + reviews / reviews only / none"),
     ("dry", "", "plan only: show who'd do what, change nothing (toggle)"),
     ("anim", "playful|calm|off big|small|tiny", "how lively and how big the monkeys are (F2 steps through all nine)"),
@@ -20,7 +20,11 @@ COMMANDS = [
     ("rules", "", "who does what (the routing rules)"),
     ("doctor", "", "check logins, connectors and models"),
     ("log", "", "recent steps in this project"),
-    ("memory", "", "show the project map and past decisions"),
+    ("memory", "", "this project's memory: files, map, decisions, recent jobs"),
+    ("shared", "", "what Claude and Codex share (house rules, skills, connectors) and what they don't"),
+    ("permissions", "", "the permission rules in force and every recent decision"),
+    ("init", "", "set this project up: one house-rules file for both agents, memory, first map"),
+    ("usage", "web", "tokens across Claude and Codex as a coloured chart; /usage web opens a live page"),
     ("quit", "", "leave Claudex"),
 ]
 TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim"}

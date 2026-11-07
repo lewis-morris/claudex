@@ -10,7 +10,7 @@ import uuid
 from . import __version__
 from .paths import self_command
 from .commands import acp_commands, expand_skill, load_skills
-from .engine import CHECKS, EFFORTS, MODES, ROUTES, Engine
+from .engine import CHECKS, EFFORTS, LEGACY_MODES, MODES, ROUTES, Engine, norm_mode
 from .rpc import Peer, RpcError
 
 
@@ -81,14 +81,16 @@ class Server:
             raise RpcError(-32602, "unknown session")
         if method == "session/set_config_option":
             cid, val = p.get("configId"), p.get("value")
+            if cid == "mode" and val in LEGACY_MODES:
+                val = norm_mode(val)
             valid = {"mode": MODES, "model": ROUTES, "effort": EFFORTS, "checks": CHECKS}.get(cid)
             if valid is None or val not in valid:
                 raise RpcError(-32602, f"unknown option {cid}={val}")
             setattr(e, OPTION_ATTR[cid], val)
             return {"configOptions": config_options(e)}
         if method == "session/set_mode":
-            if p.get("modeId") in MODES:
-                e.mode = p["modeId"]
+            if p.get("modeId") in MODES or p.get("modeId") in LEGACY_MODES:
+                e.mode = norm_mode(p["modeId"])
             return {}
         if method == "session/prompt":
             said, attached = [], []
@@ -125,7 +127,7 @@ class Server:
                 e.busy = False
         raise RpcError(-32601, f"method not found: {method}")
 
-    LOCAL = ("rules", "doctor", "log", "memory", "status", "help")
+    LOCAL = ("rules", "doctor", "log", "memory", "status", "help", "shared", "permissions", "init", "usage")
 
     def local_command(self, text):
         parts = text[1:].split(None, 1)
@@ -134,8 +136,18 @@ class Server:
     async def slash(self, e, text):
         """Answer /help, /rules, /doctor, /log, /memory, /status directly."""
         cmd = text[1:].split(None, 1)[0]
-        if cmd in ("rules", "doctor", "log"):
-            args, env = self_command(cmd, *(["--cwd", e.cwd] if cmd == "log" else []), rules=e.rules_path)
+        rest = text[1:].split(None, 1)[1].strip() if len(text[1:].split(None, 1)) > 1 else ""
+        if cmd == "usage" and rest == "web":
+            import threading
+            from . import usage
+            if not getattr(self, "_web", None):
+                self._web = threading.Thread(target=usage.serve, kwargs={"open_browser": False}, daemon=True)
+                self._web.start()
+            return "Usage page: http://localhost:8765/ (live; `claudex usage --web --lan` to see it from your phone)\n"
+        if cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "usage"):
+            extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
+                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"]}.get(cmd, [])
+            args, env = self_command(cmd, *extra, rules=e.rules_path)
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.STDOUT, env=env,
                                                      start_new_session=True)
@@ -149,16 +161,12 @@ class Server:
                 await p.wait()
                 raise
             return "```\n" + out.decode(errors="replace").strip() + "\n```\n"
-        if cmd == "memory":
-            parts = []
-            for title, path in (("Project map", e.map), ("Past decisions", e.decisions)):
-                parts.append(f"**{title}**\n\n" + (path.read_text()[-4000:] if path.exists() else "_(nothing yet)_"))
-            return "\n\n".join(parts) + "\n"
         if cmd == "status":
             return (f"Routing {e.route} · effort {e.effort} · mode {e.mode} · checks {e.checks}  \n"
                     f"Notes: `{e.notes}`\n")
         if cmd == "help":
-            lines = ["**Commands:** /rules, /doctor, /log, /memory, /status. Routing, Effort, Mode and Checks are "
+            lines = ["**Commands:** /init, /shared, /memory, /permissions, /usage (/usage web), /rules, /doctor, /log, "
+                     "/status. Routing, Effort, Mode and Checks are "
                      "the pickers. Start a message with @claude or @codex to send it to one agent.", "",
                      "**Skills** (/name, then what you want done):"]
             for name, s in sorted(getattr(e, "skills", {}).items()):

@@ -293,6 +293,36 @@ def main(argv):
     lg.add_argument("-n", type=int, default=20)
     lg.add_argument("--cwd", default=".")
     sub.add_parser("update", help="update Claude, Codex and the connectors, then run doctor")
+    ini = sub.add_parser("init", help="set this project up: one house-rules file for both agents, memory, map")
+    ini.add_argument("--yes", action="store_true", help="don't ask before changing CLAUDE.md / AGENTS.md")
+    ini.add_argument("--no-map", action="store_true", help="skip building the first project map")
+    ini.add_argument("--cwd", default=".")
+    sh = sub.add_parser("shared", help="what Claude and Codex share: house rules, skills, connectors")
+    sh.add_argument("--link-skills", action="store_true", help="make every skill available to both (links)")
+    sh.add_argument("--yes", action="store_true")
+    sh.add_argument("--cwd", default=".")
+    me = sub.add_parser("memory", help="this project's Claudex memory: files, map, decisions, recent jobs")
+    me.add_argument("--files", action="store_true", help="just list every file")
+    me.add_argument("--cwd", default=".")
+    pe = sub.add_parser("permissions", help="the permission rules in force and recent decisions")
+    pe.add_argument("--edit", action="store_true", help="edit this project's own rules")
+    pe.add_argument("-n", type=int, default=30)
+    pe.add_argument("--cwd", default=".")
+    us = sub.add_parser("usage", help="tokens across Claude and Codex, as a chart (or --web for a live page)")
+    us.add_argument("--days", type=int, default=14)
+    us.add_argument("--project", help="just this folder")
+    us.add_argument("--web", action="store_true", help="open a live page in your browser")
+    us.add_argument("--lan", action="store_true", help="with --web: also reachable from other devices on your network")
+    us.add_argument("--port", type=int, default=8765)
+    us.add_argument("--no-open", action="store_true", help="with --web: don't open the browser")
+    us.add_argument("--json", action="store_true", help="raw numbers")
+    be = sub.add_parser("bench", help="race Claude, Codex and Claudex on small projects")
+    be.add_argument("--tasks", help="comma-separated (default: all)")
+    be.add_argument("--arms", default="claude,codex,claudex", help="who races (default: all three)")
+    be.add_argument("--runs", type=int, default=1, help="runs per task and contender (results vary: 2+ is fairer)")
+    be.add_argument("--no-judge", action="store_true", help="skip the blind reviews")
+    be.add_argument("--timeout", type=int, default=30, help="minutes per run")
+    be.add_argument("--list", action="store_true", help="list the tasks")
     li = sub.add_parser("login", help="sign in to Claude and/or Codex (only the ones that need it)")
     li.add_argument("agent", nargs="?", choices=["claude", "codex"], help="just this one")
     li.add_argument("--device", action="store_true", help="Codex: sign in with a code (for a remote machine)")
@@ -306,4 +336,23 @@ def main(argv):
         return show_log(a.cwd, a.n)
     if a.cmd == "login":
         return login(a.agent, a.device, a.again)
+    if a.cmd == "bench":
+        from . import bench
+        if a.list:
+            for name, t in bench.tasks().items():
+                print(f"{name:<14} {t['title']}")
+            return 0
+        arms = tuple(x.strip() for x in a.arms.split(",") if x.strip() in bench.ARMS)
+        return bench.main(a.tasks.split(",") if a.tasks else None, arms, a.runs, not a.no_judge, a.timeout)
+    from . import admin
+    if a.cmd == "init":
+        return admin.init(a.cwd, a.yes, a.no_map)
+    if a.cmd == "shared":
+        return admin.shared(a.cwd, a.link_skills, a.yes)
+    if a.cmd == "memory":
+        return admin.memory(a.cwd, a.files)
+    if a.cmd == "permissions":
+        return admin.show_permissions(a.cwd, a.n, a.edit)
+    if a.cmd == "usage":
+        return admin.show_usage(a.days, a.project, a.web, a.lan, a.port, a.json, a.no_open)
     return update()

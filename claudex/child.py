@@ -17,6 +17,9 @@ class Child:
         self.options = {}          # config id -> list of allowed values
         self._text = []            # agent message text of the current step
         self.busy = False
+        self.decide = None         # Claudex's permission decider (rules, gatekeeper, you)
+        self.usage = {}            # latest usage_update: context used/size and cost so far
+        self.limit_hit = None      # the agent said this turn was refused for a usage limit
 
     async def start(self):
         env = tool_env()
@@ -62,7 +65,7 @@ class Child:
             return False
 
     async def prompt(self, text):
-        self._text, self.busy = [], True
+        self._text, self.busy, self.limit_hit = [], True, None
         try:
             res = await self.peer.request("session/prompt", {
                 "sessionId": self.session_id, "prompt": [{"type": "text", "text": text}]})
@@ -110,6 +113,13 @@ class Child:
             return
         upd = dict(params.get("update") or {})
         kind = upd.get("sessionUpdate")
+        if kind == "usage_update":
+            cost = upd.get("cost") or {}
+            self.usage = {"used": upd.get("used"), "size": upd.get("size"), "cost": cost.get("amount")}
+            rl = (upd.get("_meta") or {}).get("_claude/rateLimit") or {}
+            if rl.get("status") == "rejected" and rl.get("overageStatus") not in ("allowed", "allowed_warning"):
+                self.limit_hit = rl          # e.g. {"rateLimitType": "five_hour", "resetsAt": 1762300000}
+            return
         if kind == "agent_message_chunk":
             c = upd.get("content") or {}
             if c.get("type") == "text":
@@ -126,6 +136,8 @@ class Child:
             if "toolCallId" in tc:
                 tc["toolCallId"] = f"{self.name}:{tc['toolCallId']}"
             p["toolCall"] = tc
+            if self.decide:
+                return await self.decide(p)
             return await self.ui.permission(p)
         raise RpcError(-32601, f"claudex does not provide {method}")
 

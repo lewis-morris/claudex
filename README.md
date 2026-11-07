@@ -35,6 +35,9 @@ need both, and the best results come when someone *else* checks the work. Claude
   its usage limit, the same side checks instead, and Claudex says so in bold.)
 - **One shared memory.** Everyone (lead, workers, reviewers) sees the same project map, past decisions,
   a journal of every job from every session, each worker's handover, and *both* `CLAUDE.md` and `AGENTS.md`.
+- **Its own permission rules, with a gatekeeper.** Workers ask before acting; Claudex answers from one set
+  of rules for both agents, a quick gatekeeper model handles the grey areas, and only the hard calls reach you.
+  Or go **unrestricted** and nothing asks at all.
 - **Usage limits handled.** If one agent runs out mid-job, the other finishes that part with a recap of what
   was done, and the check covers both agents' changes. If both are out, it stops and tells you when each
   resets (when the tool says). Send a job to one agent on purpose (`@codex …`) and it's never switched.
@@ -103,6 +106,60 @@ to just one of them.
 | **Ctrl-C** | stop the current job (the chat stays open) |
 | **Ctrl-D** or `/quit` | leave |
 
+## Permissions: ask, auto, or unrestricted
+
+| Mode | What happens |
+|---|---|
+| `ask` | every request comes to you |
+| `auto` (default) | Claudex's rules decide: **deny** rules first, then **ask** (you), then **allow**. Anything not covered goes to the **gatekeeper** (Claude Sonnet, low effort), which allows, denies, or passes it to you. Nobody watching (scripts, the benchmark)? "Ask you" becomes "no" |
+| `unrestricted` | the workers run in their most permissive modes and never ask. A red **UNRESTRICTED** warning sits in the status bar. Use it on throwaway branches or machines |
+
+The default rules let workers read anything, edit inside the project, and run tests, builds, linters and
+`git status/diff/log`. They ask you about `git push`, deploys, installs, `ssh`, deleting folders and the
+internet, and refuse `sudo`, your `~/.ssh` and other secrets, force-pushes, `curl … | sh`, and edits outside
+the project. A chained command (`ls && curl …`) never sneaks through on an allow rule: the gatekeeper looks at
+it. Every decision is logged with who made it: `claudex permissions` shows the rules and the last 30.
+Change them everywhere with `claudex rules --edit`, or just for one project with `claudex permissions --edit`.
+
+```
+$ claudex permissions
+  …
+  11-07T08:12 allow gatekeeper  claude run  cat >> calc.py <<'EOF' …   Appends triple() to calc.py, a normal edit…
+  11-07T08:14 deny  rule        codex  edit /etc/hosts                  edit:@outside
+```
+
+## One setup for both agents
+
+- **`claudex init`** sets a project up: one house-rules file both agents follow (`AGENTS.md`, with `CLAUDE.md`
+  pointing at it, which Claude supports, so it works outside Claudex too), the memory folder, a project rules
+  file, and a first project map. It shows you the changes first and never commits them.
+- **`claudex shared`** shows what the two agents share and what they don't: house rules, skills (Claude only /
+  Codex only / both), and connectors (MCP servers). `--link-skills` makes every skill available to both.
+- **`claudex memory`** lists everything Claudex remembers about the project, with the map, decisions and recent jobs.
+
+## Usage across both agents
+
+`claudex usage` draws a coloured chart of tokens by day, project, model and Claudex role, read from both agents'
+own logs plus Claudex's one-shot calls. `claudex usage --web` opens a live page (add `--lan` to see it on your
+phone); `--json` gives raw numbers. In the chat: `/usage`, `/usage web`.
+
+<img src="docs/images/usage-web.png" alt="The Claudex usage page (example data): totals for Claude and Codex, a stacked bar chart by day, and tables by project, model and Claudex role" width="100%">
+
+<sub>Example data. Neither tool reports how much of your plan's allowance is left, so this shows tokens.</sub>
+
+## Does it actually help? `claudex bench`
+
+`claudex bench` races **Claude alone**, **Codex alone** and **Claudex** on the same small projects, each run
+unattended in a fresh folder:
+
+- **Hidden tests** it never saw decide the main score (% passing).
+- **Two blind reviewers** (Claude Opus and Codex Astra) mark an anonymous copy out of 10.
+- **Time** and **tokens** (from both agents' logs for that folder) show the cost.
+
+It writes `report.md`, `report.html` and `results.json` to `~/.local/share/claudex/bench/`. Tasks live in
+[`claudex/bench_tasks/`](claudex/bench_tasks): a brief, a starter project, and hidden tests. Add your own.
+`--runs 2` or more gives fairer results (models vary from run to run).
+
 <details>
 <summary><b>All commands and options</b></summary>
 
@@ -115,10 +172,17 @@ claudex doctor [--live]      logins, versions, connectors, every model in the ru
 claudex rules [--edit]       who does what (--edit makes your own copy and opens it)
 claudex log [-n N]           recent steps in this project
 claudex update               update Claude, Codex and both connectors, then run doctor
+claudex init                 one house-rules file for both agents, memory, project rules, first map
+claudex shared [--link-skills]   what both agents share (house rules, skills, connectors)
+claudex memory [--files]     this project's Claudex memory
+claudex permissions [--edit] the rules in force and every recent decision
+claudex usage [--web --lan --json --days N --project DIR]   tokens across both agents
+claudex bench [--tasks … --arms … --runs N --no-judge]      race Claude, Codex and Claudex
 claudex demo                 a pretend job, to preview the look
 
   --route auto|claude|codex           who does the work (default auto)
-  --mode default|acceptEdits|auto|bypassPermissions   what workers may do without asking (default auto)
+  --mode ask|auto|unrestricted        who approves what workers do (default auto)
+  --unattended                        nobody's watching: anything that would ask you is refused
   --effort auto|low|medium|high|xhigh force one reasoning level for every step
   --checks full|reviews|off           second opinions + reviews / reviews only / none
   --lead-model M  --lead-effort E     change the lead for this run
@@ -126,7 +190,7 @@ claudex demo                 a pretend job, to preview the look
 ```
 
 In the chat: `/auto /claude /codex`, `/effort …`, `/mode …`, `/checks …`, `/anim …`, `/dry`, `/status`,
-`/rules`, `/doctor`, `/log`, `/memory`, `/help`, `/quit`.
+`/init`, `/shared`, `/memory`, `/permissions`, `/usage` (`/usage web`), `/rules`, `/doctor`, `/log`, `/help`, `/quit`.
 
 </details>
 
@@ -180,6 +244,8 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 | `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
 | `sessions/<id>/notes.md` | this session's requests, handovers and reviews (long handovers saved whole) |
 | `sessions/<id>/steps.jsonl` | agent, model, reasoning, time and verdict for every step |
+| `permissions.jsonl` | every permission decision: what, who decided (rule, gatekeeper, you), why |
+| `rules.toml` | this project's own rules, layered over yours (made by `claudex init`) |
 
 Every role gets the same memory, plus your project's `CLAUDE.md` **and** `AGENTS.md` (in full; a file over
 40,000 characters comes with an instruction to read the rest), so both agents follow one set of house rules. A test (`test_everyone_shares_one_memory`) proves it across two sessions.
@@ -214,8 +280,8 @@ Pick **claudex** for a new session: you get Routing, Effort, Mode and Checks pic
 - **If a check can't run** (signed out, timed out), the job stops rather than pretending it passed. If it
   can't run because of a usage limit, the other side's strongest model checks instead, flagged as not
   independent.
-- Workers run with the permission mode you choose (`--mode`); the default `auto` uses each agent's own
-  safety checks.
+- **Permissions are Claudex's own** (see above): in `auto`, workers ask and Claudex's rules and gatekeeper
+  answer, logged. Codex also keeps its own sandbox underneath. `unrestricted` turns all of that off, by design.
 
 ## Development
 

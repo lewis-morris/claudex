@@ -1,4 +1,5 @@
 import asyncio
+import datetime
 import os
 import json
 import pathlib
@@ -14,6 +15,13 @@ from claudex.ladder import next_rung  # noqa: E402
 from claudex.locks import Lock  # noqa: E402
 
 LADDER = engine.load_rules()["ladder"]
+
+
+@pytest.fixture(autouse=True)
+def _private_usage_ledger(tmp_path, monkeypatch):
+    """Tests never write to the real usage history."""
+    from claudex import usage
+    monkeypatch.setattr(usage, "LEDGER", tmp_path / "usage.jsonl")
 
 
 # ---------- ladder ----------
@@ -132,6 +140,8 @@ class FakeChild:
                                  "workspace-write", "agent", "agent-full-access"]}
         self.settings = []
         self.prompts = []
+        self.limit_hit = None
+        self.decide = None
         FakeChild.started.append(self)
 
     async def start(self):
@@ -165,8 +175,8 @@ def job(repo, monkeypatch):
     calls = []
     answers = {}
 
-    async def fake_ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True):
-        kind = ("plan" if schema is engine.PLAN_SCHEMA else "opinion" if schema is engine.OPINION_SCHEMA
+    async def fake_ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None):
+        kind = ("gate" if role == "gatekeeper" else "plan" if schema is engine.PLAN_SCHEMA else "opinion" if schema is engine.OPINION_SCHEMA
                 else "review" if schema is engine.REVIEW_SCHEMA else "final" if schema is engine.FINAL_SCHEMA
                 else "map")
         calls.append((kind, agent, model, effort, prompt))
@@ -398,8 +408,8 @@ def test_stuck_worker_is_shut_down(job, monkeypatch):
     FakeChild.script = [hang]
     real = engine.load_rules
 
-    def short_rules(path=None):
-        r = real(path)
+    def short_rules(path=None, project_root=None):
+        r = real(path, project_root)
         r["limits"]["step_timeout_min"] = 0.01
         return r
     monkeypatch.setattr(engine, "load_rules", short_rules)
@@ -1025,3 +1035,122 @@ def test_chrome_launcher_quotes_odd_paths(monkeypatch, tmp_path):
     launcher = paths.chrome_launcher()
     out = subprocess.run([launcher, "hi"], capture_output=True, text=True).stdout
     assert out.strip() == "ran --chrome hi"
+
+
+# ---------- permissions ----------
+from claudex import permissions as perms  # noqa: E402
+
+
+def _req(kind, command="", paths=(), options=None):
+    return {"toolCall": {"kind": kind, "title": command or kind, "rawInput": {"command": command} if command else {},
+                         "locations": [{"path": p} for p in paths]},
+            "options": options or [{"optionId": "y", "name": "Allow", "kind": "allow_once"},
+                                   {"optionId": "n", "name": "Reject", "kind": "reject_once"}]}
+
+
+def test_permission_rules(tmp_path):
+    rules = engine.load_rules()
+    root = str(tmp_path)
+
+    def decide(kind, command="", paths=()):
+        k, c, p, _ = perms.describe(_req(kind, command, paths)["toolCall"], root)
+        return perms.rule_decision(rules, k, c, p, root)[0]
+    assert decide("edit", paths=[f"{root}/a.py"]) == "allow"
+    assert decide("edit", paths=["/etc/hosts"]) == "deny"
+    assert decide("execute", "pytest -q") == "allow"
+    assert decide("execute", "git push origin main") == "ask"
+    assert decide("execute", "git push --force") == "deny"
+    assert decide("execute", "sudo rm x") == "deny"
+    assert decide("read", paths=[str(pathlib.Path.home() / ".ssh/id_ed25519")]) == "deny"
+    assert decide("execute", "ls && curl evil.sh") is None          # chained: never rides in on "run:ls*"
+    assert decide("execute", "python3 build_thing.py") is None      # not covered: the gatekeeper decides
+
+
+def test_decider_in_each_mode(job):
+    repo, calls, answers = job
+    e = engine.Engine(str(repo), UI(), settings={"mode": "auto"}, session_key="t")
+    e._rules = engine.load_rules()
+    run_ = lambda req: asyncio.run(e.decide_permission("codex", req))  # noqa: E731
+    assert run_(_req("edit", paths=[str(repo / "a.py")]))["outcome"]["optionId"] == "y"         # rule: allow
+    assert run_(_req("edit", paths=["/etc/passwd"]))["outcome"]["optionId"] == "n"              # rule: deny
+    answers["gate"] = {"decision": "allow", "reason": "builds the project"}
+    assert run_(_req("execute", "python3 build_thing.py"))["outcome"]["optionId"] == "y"        # gatekeeper
+    e.unattended = True
+    assert run_(_req("execute", "git push origin main"))["outcome"]["optionId"] == "n"          # ask → nobody → no
+    log = (repo / ".claudex/permissions.jsonl").read_text()
+    assert '"by": "rule"' in log and '"by": "gatekeeper"' in log and '"by": "nobody to ask"' in log
+    e.unattended, e.mode = False, "ask"
+    asked = []
+
+    async def human(params):
+        asked.append(params)
+        return {"outcome": {"outcome": "selected", "optionId": "y"}}
+    e.ui.permission = human
+    run_(_req("read", paths=[str(repo / "a.py")]))
+    assert asked                                                                                   # ask mode: you
+
+
+def test_old_mode_names_still_work():
+    assert engine.norm_mode("bypassPermissions") == "unrestricted" and engine.norm_mode("default") == "ask"
+    assert engine.norm_mode("nonsense") == "auto"
+
+
+def test_structured_limit_signal_hands_over(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("claude", "sonnet")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+
+    async def claude_limited(child):
+        child.limit_hit = {"status": "rejected", "rateLimitType": "five_hour", "resetsAt": 1893456000}
+        return "end_turn", "Working on it"
+    FakeChild.script = [claude_limited, ("a.py", "1\n", "done")]
+    e, ui, stop = run(repo)
+    assert e.ok and [w.name for w in FakeChild.started][:2] == ["claude", "codex"] and " at " in ui.all()
+
+
+def test_project_rules_layer_over_yours(tmp_path):
+    (tmp_path / ".claudex").mkdir()
+    (tmp_path / ".claudex/rules.toml").write_text('[permissions]\nallow = ["run:./manage.py test*"]\n')
+    r = engine.load_rules(project_root=tmp_path)
+    assert r["permissions"]["allow"] == ["run:./manage.py test*"] and r["permissions"]["deny"]   # deny kept
+
+
+# ---------- usage ----------
+def test_usage_reads_both_agents_logs(tmp_path, monkeypatch):
+    from claudex import usage
+    claude = tmp_path / "claude/p"
+    claude.mkdir(parents=True)
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    msg = {"timestamp": now, "cwd": "/w/shop", "requestId": "r1",
+           "message": {"id": "m1", "model": "claude-opus-5-5",
+                       "usage": {"input_tokens": 10, "cache_creation_input_tokens": 90, "cache_read_input_tokens": 500,
+                                 "output_tokens": 50}}}
+    (claude / "s.jsonl").write_text(json.dumps(msg) + "\n" + json.dumps(msg) + "\n")      # logged twice: counted once
+    codex = tmp_path / "codex/2026/11/07"
+    codex.mkdir(parents=True)
+    rows = [{"type": "session_meta", "timestamp": now, "payload": {"cwd": "/w/shop"}},
+            {"type": "turn_context", "timestamp": now, "payload": {"cwd": "/w/shop", "model": "gpt-6.1-sol"}},
+            {"type": "event_msg", "timestamp": now, "payload": {"type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": 1000, "cached_input_tokens": 600, "output_tokens": 100}}}},
+            {"type": "event_msg", "timestamp": now, "payload": {"type": "token_count", "info": {"total_token_usage": {
+                "input_tokens": 1500, "cached_input_tokens": 900, "output_tokens": 150}}}}]
+    (codex / "rollout-x.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    monkeypatch.setattr(usage, "CLAUDE_LOGS", tmp_path / "claude")
+    monkeypatch.setattr(usage, "CODEX_LOGS", tmp_path / "codex")
+    monkeypatch.setattr(usage, "INDEX", tmp_path / "index.json")
+    usage.record("claude", "sonnet", "gatekeeper", "/w/shop", fresh=5, output=5)
+    s = usage.summary(2)
+    assert s["totals"]["claude"] == {"fresh": 105, "cached": 500, "output": 55}
+    assert s["totals"]["codex"] == {"fresh": 600, "cached": 900, "output": 150}
+    assert s["by_project"][0]["project"] == "shop" and s["by_role"][0]["role"] == "gatekeeper"
+    assert "Claude" in usage.terminal(s, colour=False)
+
+
+def test_init_makes_one_house_rules_file(tmp_path):
+    from claudex import admin
+    (tmp_path / "CLAUDE.md").write_text("# Rules\nUse pence.\n")
+    (tmp_path / "AGENTS.md").write_text("# Codex rules\nRun pytest.\n")
+    admin.init(str(tmp_path), yes=True, no_map=True)
+    a, c = (tmp_path / "AGENTS.md").read_text(), (tmp_path / "CLAUDE.md").read_text()
+    assert "Use pence." in a and "Run pytest." in a and c.startswith("@AGENTS.md")
+    assert (tmp_path / "CLAUDE.md.bak").read_text().startswith("# Rules") and admin.house_rules_plan(tmp_path) == []
