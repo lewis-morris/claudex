@@ -104,6 +104,12 @@ class Server:
                     attached.append(f"\n<file {r.get('uri')}>\n{r.get('text', '')}\n</file>\n")
             # Commands and skills are read from what the user typed, wherever attachments sit.
             typed = "\n".join(said).strip()
+            from .paths import STARTED_STAMP, code_stamp
+            if code_stamp() > STARTED_STAMP and not getattr(e, "told_stale", False):
+                e.told_stale = True
+                await e.ui.say("_🐒 Claudex has been updated since this session started. Restart the session to use "
+                               "the new version (in Agents of Empires: stop and resume it, or `aoe acp stop <session>`; "
+                               "it comes back on your next message)._\n\n")
             extra = "\n".join(attached)
             if e.busy:
                 raise RpcError(-32000, "Claudex is still working on the last message")
@@ -146,7 +152,8 @@ class Server:
             return "Usage page: http://localhost:8765/ (live; `claudex usage --web --lan` to see it from your phone)\n"
         if cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "usage", "models"):
             extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
-                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"], "models": ["--cwd", e.cwd]}.get(cmd, [])
+                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"],
+                     "models": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])}.get(cmd, [])
             args, env = self_command(cmd, *extra, rules=e.rules_path)
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.STDOUT, env=env,

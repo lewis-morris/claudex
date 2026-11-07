@@ -1263,3 +1263,78 @@ def test_bench_scoring_cant_be_rigged(tmp_path):
     (proj / "pytest.py").write_text("raise SystemExit(0)\n")
     h = bench.hidden_tests(task, proj)          # quote_total doesn't exist: everything must fail
     assert h["passed"] == 0 and h["total"] == 13
+
+
+# ---------- Codex's third review ----------
+def test_models_md_grammar_and_warnings():
+    from claudex import models
+    m = models.parse("\n".join([
+        "| When | Agent | Model | Reasoning |", "|---|---|---|---|",
+        "| VAT \\| invoices | codex | gpt-6-astra | high |", "| typo | claud | sonnet | high |",
+        "", "Lead: `claude opus high`", "```", "Default: codex nonsense low", "```",
+        "## Payments", "- Never touch payments without asking."]))
+    assert m["rows"][0]["when"] == "VAT | invoices" and len(m["rows"]) == 1
+    assert m["settings"] == {"lead": ("claude", "opus", "high")}                 # the fenced example isn't a setting
+    assert "## Payments" in m["notes"] and "Never touch payments" in m["notes"]
+    assert m["warnings"] and m["warnings"][0].startswith("line 4:")
+
+
+def test_models_init_keeps_notes_in_force(tmp_path, monkeypatch):
+    from claudex import admin, models
+    monkeypatch.setattr(models, "USER_MODELS", tmp_path / "global.md")
+    (tmp_path / "global.md").write_text("- Never touch payments without asking.\n")
+    proj = tmp_path / "p"
+    proj.mkdir()
+    admin.show_models(str(proj), init_file=True)
+    assert "Never touch payments" in engine.load_rules(project_root=proj)["_lead_notes"]
+
+
+@pytest.mark.parametrize("cmd", ["git branch -vf archive HEAD~1", "git diff --output=/tmp/v", "rg --pre=sh x ./s",
+                                 "cat $HOME/.ssh/id", "cat ~/.ss[h]/id", "git -c core.pager=sh log"])
+def test_tricky_commands_go_to_the_gatekeeper(cmd, tmp_path):
+    r = engine.load_rules()
+    k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": cmd}}, str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path))[0] in (None, "deny", "ask")
+
+
+def test_active_config_files_are_protected(tmp_path):
+    r = engine.load_rules()
+    f = tmp_path / "conf/team-models.md"
+    k, c, p, _ = perms.describe({"kind": "edit", "locations": [{"path": str(f)}]}, str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path), [str(f)])[0] == "deny"
+
+
+def test_backups_never_follow_links(tmp_path):
+    from claudex import admin
+    (tmp_path / "CLAUDE.md").write_text("mine\n")
+    outside = tmp_path / "outside.txt"
+    (tmp_path / "CLAUDE.md.bak").symlink_to(outside)                    # dangling link where a backup would go
+    dest = admin._backup(tmp_path / "CLAUDE.md")
+    assert dest.name == "CLAUDE.md.bak1" and not outside.exists()
+
+
+def test_doctor_checks_the_gatekeeper_model():
+    from claudex import tools
+    assert any("gatekeeper" in w for w in sum(tools.used_models(engine.load_rules()).values(), []))
+
+
+def test_who_did_the_work_and_why(job, monkeypatch, tmp_path):
+    from claudex import usage
+    monkeypatch.setattr(usage, "PROJECTS", tmp_path / "projects.json")
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [dict(step("codex"), why="sums are Codex's thing")], "big_decisions": [],
+                       "concern_responses": []}
+    answers["review"] = [{"verdict": "fix", "issues": ["x"], "summary": ""}, {"verdict": "pass", "issues": [], "summary": ""}]
+    FakeChild.script = [("a.py", "1\n", "a"), ("a.py", "2\n", "b")]
+    run(repo)
+    w = usage.work_report("2000-01-01")
+    a = w["workers"][0]
+    assert a["agent"] == "codex" and a["steps"] == 1 and a["sent_back"] == 1
+    assert a["why"][0]["reason"] == "sums are Codex's thing"
+
+
+def test_bench_stops_everything_left_in_the_folder(tmp_path):
+    from claudex import bench
+    p = subprocess.Popen(["sleep", "60"], cwd=tmp_path, start_new_session=True)   # like a worker in its own group
+    bench._stop_in(tmp_path)
+    assert p.wait(timeout=10) is not None

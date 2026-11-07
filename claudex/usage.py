@@ -171,6 +171,79 @@ def buckets(since_days=30):
              "project": k.split("|", 3)[3], "fresh": v[0], "cached": v[1], "output": v[2]} for k, v in merged.items()]
 
 
+# ---------- who did the work, and why (from Claudex's own records in each project) ----------
+PROJECTS = DATA / "projects.json"
+
+
+def remember_project(root):
+    try:
+        known = set(json.loads(PROJECTS.read_text())) if PROJECTS.exists() else set()
+        if str(root) not in known:
+            known.add(str(root))
+            DATA.mkdir(parents=True, exist_ok=True)
+            PROJECTS.write_text(json.dumps(sorted(known)))
+    except Exception:
+        pass
+
+
+def _jsonl(path, since):
+    try:
+        for line in path.read_text(errors="replace").splitlines():
+            try:
+                r = json.loads(line)
+            except Exception:
+                continue
+            if str(r.get("at", "")) >= since:
+                yield r
+    except Exception:
+        return
+
+
+def work_report(since, project=None):
+    """Steps per agent and model (with the lead's reasons), checks, handovers and permission decisions."""
+    try:
+        roots = json.loads(PROJECTS.read_text()) if PROJECTS.exists() else []
+    except Exception:
+        roots = []
+    if project:
+        want = str(pathlib.Path(project).resolve())
+        roots = [r for r in roots if r.startswith(want) or want.startswith(r)]
+    since_local = since[:19]
+    by = {}
+    reasons = collections.defaultdict(collections.Counter)
+    checks = collections.Counter()
+    perms_by = collections.Counter()
+    for root in roots:
+        base = pathlib.Path(root) / ".claudex"
+        for f in base.glob("sessions/*/steps.jsonl"):
+            for r in _jsonl(f, since_local):
+                kind = r.get("kind")
+                if kind == "step":
+                    key = f"{r.get('agent')} · {r.get('model')} · {r.get('effort')}"
+                    a = by.setdefault(key, {"who": key, "agent": r.get("agent"), "steps": 0, "tries": 0,
+                                            "secs": 0.0, "sent_back": 0, "projects": set()})
+                    a["tries"] += 1
+                    a["steps"] += 1 if r.get("attempt", 1) == 1 else 0
+                    a["secs"] += float(r.get("secs") or 0)
+                    a["sent_back"] += 1 if r.get("verdict") == "fix" else 0
+                    a["projects"].add(pathlib.Path(root).name)
+                    why = (r.get("why") or r.get("title") or "").split(" (handed")[0].strip()
+                    if r.get("attempt", 1) == 1 and why:
+                        reasons[key][why[:110]] += 1
+                elif kind in ("second_opinion", "final_check"):
+                    checks[f"{kind.replace('_', ' ')}: {r.get('verdict')}"] += 1
+                elif kind == "usage_limit":
+                    checks[f"usage limit hit: {r.get('agent')}"] += 1
+        for r in _jsonl(base / "permissions.jsonl", since_local):
+            perms_by[f"{r.get('by')} → {r.get('decision')}"] += 1
+    rows = sorted(by.values(), key=lambda a: -a["tries"])
+    for a in rows:
+        a["projects"] = sorted(a["projects"])
+        a["minutes"] = round(a.pop("secs") / 60, 1)
+        a["why"] = [{"reason": k, "times": v} for k, v in reasons[a["who"]].most_common(4)]
+    return {"workers": rows, "checks": checks.most_common(), "permissions": perms_by.most_common()}
+
+
 # ---------- summaries ----------
 def summary(days=14, project=None):
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -205,7 +278,8 @@ def summary(days=14, project=None):
             totals[agent][k] += int(e.get(k) or 0)
         totals[agent]["work"] += work          # the headline number: same measure as the chart
     top = sorted(by_project.items(), key=lambda kv: -(kv[1]["claude"] + kv[1]["codex"]))[:10]
-    return {"days": days, "generated": now.isoformat(timespec="seconds"), "project": project,
+    work = work_report(since, project)
+    return {"days": days, "generated": now.isoformat(timespec="seconds"), "project": project, "work": work,
             "by_day": [{"day": d, **by_day[d]} for d in day_keys], "by_project": [{"project": k, **v} for k, v in top],
             "by_model": by_model.most_common(10), "by_role": [{"role": k, **v} for k, v in sorted(by_role.items())],
             "totals": totals,
@@ -259,6 +333,19 @@ def terminal(s, colour=True, width=50):
         lines += ["", "Claudex's own calls, by role:"]
         for r in s["by_role"]:
             lines.append(f"  {r['role']:<16} Claude {human(r['claude'])}  Codex {human(r['codex'])}")
+    w = s.get("work") or {}
+    if w.get("workers"):
+        lines += ["", "Who did the work, and why (Claudex jobs):"]
+        for a in w["workers"][:8]:
+            back = f", sent back {a['sent_back']}×" if a["sent_back"] else ""
+            lines.append("  " + paint(f"{a['who']:<34}", COLOURS.get(a["agent"], "#ffffff"))
+                         + f" {a['steps']} part(s), {a['minutes']} min{back}")
+            for r in a["why"][:2]:
+                lines.append(dim(f"      {r['times']}× {r['reason']}"))
+    if w.get("checks"):
+        lines += ["", "Checks: " + " · ".join(f"{k} ×{v}" for k, v in w["checks"][:6])]
+    if w.get("permissions"):
+        lines += ["Permission questions: " + " · ".join(f"{k} ×{v}" for k, v in w["permissions"][:6])]
     lines += ["", dim(s["note"])]
     return "\n".join(lines)
 
@@ -286,6 +373,8 @@ svg text{fill:var(--dim);font-size:11px}
 <svg id="chart" width="100%" height="260" role="img" aria-label="Tokens per day"></svg></div>
 <div class="row"><div class="card"><h3>Projects</h3><table id="proj"></table></div>
 <div class="card"><h3>Models</h3><table id="models"></table></div></div>
+<div class="card"><h3>Who did the work, and why</h3><table id="work"></table>
+<p class="dim" id="checks"></p></div>
 <div class="card"><h3>Claudex's own calls, by role</h3><table id="roles"></table></div>
 <p class="dim" id="note"></p></main>
 <script>
@@ -311,6 +400,11 @@ async function load(){
  rows('proj',s.by_project,p=>`<tr><td>${esc(p.project)}</td><td class="n" style="color:var(--claude)">${fmt(p.claude)}</td><td class="n" style="color:var(--codex)">${fmt(p.codex)}</td></tr>`);
  rows('models',s.by_model,m=>`<tr><td>${esc(m[0])}</td><td class="n">${fmt(m[1])}</td></tr>`);
  rows('roles',s.by_role,r=>`<tr><td>${esc(r.role)}</td><td class="n" style="color:var(--claude)">${fmt(r.claude)}</td><td class="n" style="color:var(--codex)">${fmt(r.codex)}</td></tr>`);
+ const w=s.work||{workers:[],checks:[],permissions:[]};
+ rows('work',w.workers,a=>`<tr><td style="color:var(--${a.agent==='codex'?'codex':'claude'})">${esc(a.who)}</td><td class="n">${a.steps} part(s)</td>
+  <td class="n">${a.minutes} min</td><td class="n">${a.sent_back?('sent back '+a.sent_back+'×'):''}</td></tr>
+  <tr><td colspan="4" class="dim">${a.why.map(r=>esc(r.times+'× '+r.reason)).join('<br>')}</td></tr>`);
+ document.getElementById('checks').textContent=[...w.checks.map(c=>c[0]+' ×'+c[1]),...w.permissions.map(c=>'permission '+c[0]+' ×'+c[1])].join(' · ');
  document.getElementById('note').textContent=s.note;}
 document.getElementById('days').onchange=load;load();setInterval(load,30000);
 </script></body></html>"""

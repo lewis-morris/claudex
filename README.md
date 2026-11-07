@@ -120,7 +120,13 @@ The default rules let workers read anything, edit inside the project, and run te
 `git status/diff/log`. They ask you about `git push`, deploys, installs, `ssh`, deleting folders and the
 internet, and refuse `sudo`, your `~/.ssh` and other secrets, force-pushes, `curl … | sh`, and edits outside
 the project. A chained command (`ls && curl …`) never sneaks through on an allow rule: the gatekeeper looks at
-it. Every decision is logged with who made it: `claudex permissions` shows the rules and the last 30.
+it, and neither does anything with a variable or wildcard in it (`$HOME`, `*`). Every decision is logged with
+who made it: `claudex permissions` shows the rules and the last 30.
+
+**What it is and isn't.** In `auto`, everything the agents *ask* about goes through these rules. Each agent
+still has a few things it does without asking (both read files; Claude also follows any allow-list in your own
+Claude settings; Codex keeps its sandbox), so treat this as a strong filter, not a sandbox. Don't point
+Claudex at code you don't trust, and keep `unrestricted` for throwaway branches.
 Change them everywhere with `claudex rules --edit`, or just for one project with `claudex permissions --edit`.
 
 ```

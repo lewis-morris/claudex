@@ -151,8 +151,13 @@ Workers ask before they act. Who answers depends on the mode (`--mode`, or `/mod
 
 The defaults let workers read, edit inside the project, and run tests, builds, linters and git inspection.
 They ask you before pushes, deploys, installs, `ssh` and deleting folders, and refuse `sudo`, your keys and
-secrets, force-pushes and edits outside the project. A chained command (`ls && …`) or a risky flag
-(`find -delete`) never gets through on an allow rule. Workers can never change Claudex's own rules or memory.
+secrets, force-pushes and edits outside the project. A chained command (`ls && …`), a risky flag
+(`find -delete`), or anything with a variable or wildcard (`$HOME`, `*`) never gets through on an allow rule:
+the gatekeeper looks at it instead. Workers can't change Claudex's own rules, models file or memory.
+
+This is a strong filter on what the agents **ask** about, not a sandbox: each agent still does a few things
+without asking (both read files; Claude follows any allow-list in your own Claude settings; Codex keeps its own
+sandbox underneath). Don't run Claudex on code you don't trust, and keep `unrestricted` for throwaway branches.
 
 Change them for one project with `claudex permissions --edit`, or everywhere with `claudex rules --edit`. A
 project can only add rules; it can't remove yours.
@@ -211,6 +216,11 @@ unattended. Then:
 - **hidden tests** they never saw decide the main score;
 - **two blind reviewers** (Claude Opus and Codex Astra) mark an anonymous copy out of 10;
 - **time** and **tokens** show what it cost.
+
+The hidden tests run from a trusted copy, ignoring any test settings, plugins or `conftest.py` a contender
+adds, and a missing test counts as a fail. That guards against accidents, not sabotage: the contenders' own
+code runs during the tests, so a deliberately malicious one could still interfere. It's for comparing honest
+agents, not judging hostile code.
 
 The report (`report.md`, `report.html`, `results.json`) goes to `~/.local/share/claudex/bench/`. Add your own
 task: a folder in `claudex/bench_tasks/` with a `task.toml` (the brief and how many hidden tests), a

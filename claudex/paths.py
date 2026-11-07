@@ -91,3 +91,43 @@ def self_command(*args, rules=None):
     boot = ("import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = 'claudex'; "
             "from claudex.__main__ import main; main()")
     return [sys.executable, "-I", "-c", boot, str(PACKAGE.parent), *args], env
+
+
+def code_stamp():
+    """When Claudex's own code last changed (newest .py or rules file in the package)."""
+    try:
+        return max(f.stat().st_mtime for f in PACKAGE.rglob("*") if f.suffix in (".py", ".toml") and f.is_file())
+    except ValueError:
+        return 0.0
+
+
+STARTED_STAMP = code_stamp()      # the code this process is running
+
+
+def stale_workers():
+    """Claudex ACP workers (Agents of Empires sessions) started before the code last changed:
+    [(pid, aoe_session_id or None, minutes_running)]."""
+    import subprocess
+    import time
+    stamp = code_stamp()
+    out = []
+    try:
+        ps = subprocess.run(["ps", "-eo", "pid,ppid,etimes,args"], capture_output=True, text=True, timeout=10).stdout
+    except Exception:
+        return out
+    rows = {}
+    for line in ps.splitlines()[1:]:
+        parts = line.split(None, 3)
+        if len(parts) == 4:
+            rows[parts[0]] = parts
+    for pid, ppid, etimes, args in rows.values():
+        prog = os.path.basename(args.split()[0]) if args.split() else ""
+        if prog.startswith("python") and "claudex" in args and args.rstrip().endswith("--acp"):
+            started = time.time() - int(etimes)
+            if started < stamp:
+                parent = rows.get(ppid, ["", "", "", ""])[3]
+                sid = None
+                if "--session-id" in parent:
+                    sid = parent.split("--session-id", 1)[1].split()[0]
+                out.append((int(pid), sid, int(etimes) // 60))
+    return out

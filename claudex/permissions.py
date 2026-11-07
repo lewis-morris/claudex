@@ -76,18 +76,52 @@ def _operands(command):
     return out
 
 
+# Per-program options that write files, run other programs, or force/destroy. An allow rule can't vouch for them.
+PROGRAM_RISKS = {
+    "git": ("--output", "-o", "--ext-diff", "--exec", "--upload-pack", "--receive-pack", "-c", "--config-env",
+            "--git-dir", "--work-tree", "-C"),
+    "rg": ("--pre", "--pre-glob", "--search-zip", "-z"),
+    "grep": ("--include-dir",),
+    "tail": (), "head": (), "cat": (), "ls": (), "wc": (),
+}
+GIT_BRANCH_DANGER = set("dDmMcCf")        # delete, rename, copy, force: in any short-flag bundle (-vf, -Dq…)
+
+
 def _risky(command):
+    """True if an allow rule can't vouch for this command: risky options, or anything the shell would expand."""
+    if "$" in command or any(c in command for c in "*?[]{}"):
+        return True                    # variables, globs, brace expansion: we can't know what it touches
     try:
         words = shlex.split(command, posix=True)
     except ValueError:
         return True                    # can't parse it: don't vouch for it
-    return any(w in RISKY_WORDS or w.startswith("--exec") for w in words[1:])
+    if not words:
+        return False
+    prog, args = os.path.basename(words[0]), words[1:]
+    if any(w in RISKY_WORDS or w.startswith("--exec") for w in args):
+        return True
+    bad = PROGRAM_RISKS.get(prog, ())
+    if any(w == b or w.startswith(b + "=") or (b.startswith("--") and w.startswith(b)) for w in args for b in bad):
+        return True
+    if prog == "git" and args[:1] == ["branch"]:
+        for w in args[1:]:
+            if w.startswith("--") and w not in ("--list", "--all", "--verbose", "--remotes", "--show-current"):
+                return True
+            if w.startswith("-") and not w.startswith("--") and set(w[1:]) & GIT_BRANCH_DANGER:
+                return True
+    return False
 
 
-def protected(paths, command, project_root):
-    """True if this touches Claudex's own rules or memory, which workers may never change."""
+def protected(paths, command, project_root, extra=()):
+    """True if this touches Claudex's own rules, models file or memory, which workers may never change.
+    `extra` adds the files actually in force this session (a --rules or --models file can live anywhere)."""
     from .paths import DEFAULT_RULES, USER_RULES
-    guarded = [pathlib.Path(project_root, d).resolve() for d in PROTECTED_DIRS] + [USER_RULES, DEFAULT_RULES]
+    from .models import USER_MODELS
+    guarded = [pathlib.Path(project_root, d).resolve() for d in PROTECTED_DIRS] + [USER_RULES, DEFAULT_RULES, USER_MODELS]
+    guarded += [pathlib.Path(x).resolve() for x in extra if x]
+    names = [pathlib.Path(x).name for x in extra if x]
+    if any(n and n in command for n in names):
+        return True
     for p in paths:
         for g in guarded:
             if p == str(g) or _inside(p, g):
@@ -120,10 +154,10 @@ def matches(pattern, kind, command, paths, project_root):
     return any(fnmatch.fnmatch(t.lower(), glob.lower()) for t in targets)
 
 
-def rule_decision(rules, kind, command, paths, project_root):
+def rule_decision(rules, kind, command, paths, project_root, extra_protected=()):
     """("deny"|"ask"|"allow", pattern) for the first matching rule, deny first; (None, None) if none match."""
     perms = rules.get("permissions", {})
-    if kind in ("edit", "delete", "move", "run") and protected(paths, command, project_root):
+    if kind in ("edit", "delete", "move", "run") and protected(paths, command, project_root, extra_protected):
         return "deny", "(built in) Claudex's own rules and memory"
     unvouchable = kind == "run" and (any(op in command for op in COMPOUND) or _risky(command))
     for decision in ("deny", "ask", "allow"):

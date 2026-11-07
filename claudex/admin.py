@@ -81,19 +81,33 @@ def house_rules_plan(root):
 
 
 def _backup(f):
-    """Keep the old file next to it, never overwriting an earlier backup."""
-    n, dest = 0, f.with_name(f.name + ".bak")
-    while dest.exists():
-        n += 1
-        dest = f.with_name(f"{f.name}.bak{n}")
-    dest.write_text(f.read_text())
-    return dest
+    """Keep the old file next to it. Never overwrites anything, and never follows a link: the name is claimed
+    with O_EXCL | O_NOFOLLOW, so an existing backup (or a dangling link where one would go) is skipped."""
+    data = f.read_bytes()
+    for n in range(0, 1000):
+        dest = f.with_name(f.name + (".bak" if n == 0 else f".bak{n}"))
+        try:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o644)
+        except FileExistsError:
+            continue
+        with os.fdopen(fd, "wb") as out:
+            out.write(data)
+        return dest
+    raise RuntimeError(f"couldn't find a free backup name for {f}")
 
 
 def _write_atomic(f, text):
-    tmp = f.with_name(f".{f.name}.claudex-tmp")
-    tmp.write_text(text)
-    os.replace(tmp, f)
+    """Write via a fresh, unpredictable temporary file in the same folder, then swap it in."""
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix=f".{f.name}.", suffix=".claudex-tmp", dir=f.parent)
+    try:
+        with os.fdopen(fd, "w") as out:
+            out.write(text)
+        os.replace(tmp, f)
+    except BaseException:
+        if os.path.lexists(tmp):
+            os.unlink(tmp)
+        raise
 
 
 def init(cwd=".", yes=False, no_map=False):
@@ -309,13 +323,14 @@ def show_models(cwd=".", init_file=False, edit=False, global_=False, models_file
     if init_file or edit:
         if not target.exists():
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(models.render(load_rules(project_root=None if global_ else root)))
+            target.write_text(models.render(load_rules(project_root=None if global_ else root,
+                                                       models_file=models_file)))
             print(f"Made {target} from the rules in force: edit it to change who does what"
                   + ("" if global_ else " in this project") + ".")
         if edit:
             return subprocess.call([os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano", str(target)])
         return 0
-    rules = load_rules(project_root=root, models_file=models_file)
+    rules = load_rules(project_root=None if global_ else root, models_file=models_file)
     src = rules.get("_models_file") or f"{rules_file()} (no models.md yet)"
     print(f"{B}Who does what{RESET}  ({root.name})   from: {src}\n")
     lead, d = rules["lead"], rules["defaults"]
@@ -334,6 +349,8 @@ def show_models(cwd=".", init_file=False, edit=False, global_=False, models_file
         print(f"  {colour[u['agent']]}{u['agent']:<6} {u['model']:<12} {u['effort']:<7}{RESET}{tag}  {r['when']}")
     if rules.get("_lead_notes"):
         print(f"\n{B}Your notes for the lead{RESET}\n" + "\n".join("  " + l for l in rules["_lead_notes"].splitlines()))
+    for w in rules.get("_models_warnings") or []:
+        print(f"  {Y}! {w}{RESET}")
     where = "this project" if not global_ else "everywhere"
     print(f"\n{D}Change it: `claudex models --edit` (this project) or `claudex models --edit --global` (everywhere). "
           f"One session only: `claudex --models FILE`.{RESET}")

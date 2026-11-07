@@ -99,6 +99,9 @@ def used_models(rules):
     m = rules.get("memory", {}).get("map_model")
     if m:
         add(m["agent"], m["model"], m["effort"], "project map")
+    g = rules.get("permissions", {}).get("gatekeeper")
+    if g:
+        add(g.get("agent", "claude"), g.get("model", "sonnet"), g.get("effort", "low"), "gatekeeper")
     return out
 
 
@@ -147,8 +150,12 @@ def doctor(live=False):
 
     print("\nRules")
     try:
-        rules = load_rules()
+        from .engine import repo_root
+        here = repo_root(os.getcwd()) or os.getcwd()
+        rules = load_rules(project_root=here)       # exactly what a job here would use, models.md included
         line(OK, f"{rules_file()}" + ("  (the defaults)" if rules_file() == DEFAULT_RULES else ""))
+        if rules.get("_models_file"):
+            line(OK, f"who does what: {rules['_models_file']}")
     except Exception as e:
         line(BAD, f"{rules_file()} won't load: {e}")
         return 1
@@ -195,6 +202,15 @@ def doctor(live=False):
              "claudex is registered" if 'claudex = "' in text else "claudex isn't registered as an agent")
     except Exception:
         line(WARN, "no Agents of Empires config found")
+    from .paths import stale_workers
+    stale = stale_workers()
+    if stale:
+        for pid, sid, mins in stale:
+            line(WARN, f"a Claudex session started {mins} min ago is running older code"
+                       + (f": restart it with `aoe acp stop {sid}` (it comes back on your next message)" if sid
+                          else f" (process {pid}): restart it"))
+    else:
+        line(OK, "every running Claudex session is on the current code")
 
     if live:
         print("\nLive check (a tiny message to each model)")
@@ -271,8 +287,23 @@ def show_log(cwd, n):
     return 0
 
 
+def _self_update():
+    """Update Claudex itself: `git pull` for a checkout, `uv tool upgrade` for an install."""
+    from .paths import PACKAGE
+    root = PACKAGE.parent
+    if (root / ".git").exists():
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+                               capture_output=True, text=True).stdout.strip()
+        if dirty:
+            return ["echo", f"Claudex at {root} has uncommitted changes, so it wasn't pulled"]
+        return ["git", "-C", str(root), "pull", "--ff-only"]
+    if shutil.which("uv"):
+        return ["uv", "tool", "upgrade", "claudex"]
+    return ["echo", "Update Claudex with however you installed it (pipx upgrade claudex, …)"]
+
+
 def update():
-    steps = [["claude", "update"], ["codex", "update"],
+    steps = [_self_update(), ["claude", "update"], ["codex", "update"],
              ["npm", "update", "-g", *CONNECTOR_PACKAGES]]
     for cmd in steps:
         print(f"\n$ {' '.join(cmd)}")

@@ -11,7 +11,7 @@ import time
 import tomllib
 import uuid
 
-from . import fun, gitsnap, headless, permissions
+from . import fun, gitsnap, headless, permissions, usage
 from .child import Child
 from .ladder import next_rung
 from .locks import CHROME_LOCK, Lock
@@ -397,7 +397,8 @@ class Engine:
 
         if self.mode == "ask":
             return await human("you chose to approve everything yourself")
-        decision, pattern = permissions.rule_decision(rules, kind, command, paths, self.project_root)
+        in_force = [self.rules_path, self.models_file, rules.get("_models_file")]
+        decision, pattern = permissions.rule_decision(rules, kind, command, paths, self.project_root, in_force)
         if decision in ("allow", "deny"):
             if decision == "deny":
                 await self.ui.say(f"\n_🛡 Claudex refused: {agent.title()} wanted to {kind} {what[:120]} "
@@ -555,6 +556,8 @@ class Engine:
                               "(`--checks off`, or Checks: No checks in Agents of Empires).\n")
             return "end_turn"
         self._prepare_memory()
+        if not self.dry_run:
+            usage.remember_project(self.project_root)   # so `claudex usage` can show who did what, and why
         work_lock = None if self.dry_run else Lock(self.root / "work.lock")
         try:
             if work_lock:
@@ -876,7 +879,7 @@ class Engine:
                 self._append(self.notes, f"## Step {i}: {s['title']} ({agent} {model} {effort}, attempt {attempt})"
                                          f"\n{out}\n\n")
                 row = dict(kind="step", step=i, title=s["title"], agent=agent, model=model, effort=effort,
-                           attempt=attempt, secs=secs, stop=stop, browser=s["browser"],
+                           attempt=attempt, secs=secs, stop=stop, browser=s["browser"], why=s.get("why", "")[:240],
                            handoff=self._keep_handover(i, attempt, agent, out))
                 if stop == "cancelled" or self.cancelled:
                     self._log(**row)

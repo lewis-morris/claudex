@@ -178,11 +178,12 @@ async def handle_command(line, eng, skills):
         print(f"{DIM}Plan only: {'on' if eng.dry_run else 'off'}{RESET}")
     elif cmd == "status":
         print(f"{DIM}{status_line(eng).strip()}\nNotes: {eng.notes}{RESET}")
-    elif cmd in ("rules", "doctor", "log"):
-        extra = ["--cwd", eng.cwd] if cmd == "log" else []
+    elif cmd in ("rules", "doctor", "log", "models", "shared", "memory", "permissions", "init", "usage"):
+        extra = {"log": ["--cwd", eng.cwd], "shared": ["--cwd", eng.cwd], "memory": ["--cwd", eng.cwd],
+                 "permissions": ["--cwd", eng.cwd], "init": ["--cwd", eng.cwd],
+                 "models": ["--cwd", eng.cwd] + (["--models", eng.models_file] if eng.models_file else []),
+                 "usage": ["--web"] if arg == "web" else []}.get(cmd, [])
         await asyncio.get_running_loop().run_in_executor(None, lambda: run_tool(cmd, *extra, rules=eng.rules_path))
-    elif cmd == "memory":
-        show_memory(eng)
     else:
         return False, False
     return True, False

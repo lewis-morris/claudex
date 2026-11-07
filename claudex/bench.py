@@ -70,6 +70,7 @@ def command(arm, brief, folder):
 RUNNER = r"""
 import sys, pytest
 project, tests, ini, xml = sys.argv[1:5]
+del sys.argv[1:]                  # the contender's code doesn't get told where the results go
 sys.path.append(project)          # last, so the project can't stand in for pytest or the standard library
 sys.exit(pytest.main([tests, "-c", ini, "--rootdir", tests, "--noconftest", "-p", "no:cacheprovider",
                       "-q", "--tb=line", "--junitxml", xml]))
@@ -88,14 +89,18 @@ def hidden_tests(task, folder):
     xml = work / "results.xml"
     expected = int(task.get("expected_tests", 0))
     env = {k: v for k, v in tool_env().items() if not k.startswith("PYTEST")}
+    # -E: ignore PYTHON* settings; -P: don't put the current folder first on the import path
+    proc = subprocess.Popen([sys.executable, "-E", "-P", "-c", RUNNER, str(folder), str(tests), str(ini), str(xml)],
+                            cwd=folder, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+                            start_new_session=True)
     try:
-        # -E: ignore PYTHON* settings; -P: don't put the current folder first on the import path
-        p = subprocess.run([sys.executable, "-E", "-P", "-c", RUNNER, str(folder), str(tests), str(ini), str(xml)],
-                           cwd=folder, capture_output=True, text=True, timeout=300, env=env,
-                           start_new_session=True)
-        exit_code = p.returncode
+        proc.communicate(timeout=300)
+        exit_code = proc.returncode
     except subprocess.TimeoutExpired:
+        _stop_group(proc)
+        _stop_in(folder)
         return {"passed": 0, "failed": expected, "total": expected, "pct": 0.0, "note": "hidden tests timed out"}
+    _stop_in(folder)
     passed = failed = 0
     try:
         for case in ET.parse(xml).getroot().iter("testcase"):
@@ -173,6 +178,33 @@ def _stop_group(proc):
         pass
 
 
+def _stop_in(folder):
+    """Stop every process still working in this folder. Claudex's workers run in their own process groups, so
+    stopping the contender's group isn't enough; anything whose working folder is inside it is ours to stop."""
+    import signal
+    root = str(pathlib.Path(folder).resolve())
+    me = os.getpid()
+    for attempt in range(3):
+        found = []
+        for d in pathlib.Path("/proc").iterdir():
+            if not d.name.isdigit() or int(d.name) == me:
+                continue
+            try:
+                cwd = os.readlink(d / "cwd")
+            except OSError:
+                continue
+            if cwd == root or cwd.startswith(root + "/"):
+                found.append(int(d.name))
+        if not found:
+            return
+        for pid in found:
+            try:
+                os.kill(pid, signal.SIGTERM if attempt == 0 else signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        time.sleep(1)
+
+
 def run_one(task_name, task, arm, n, stamp, timeout_min, judge_it):
     folder = WORK / stamp / f"{task_name}-{arm}-{n}"
     prepare(task, folder)
@@ -190,6 +222,7 @@ def run_one(task_name, task, arm, n, stamp, timeout_min, judge_it):
     except subprocess.TimeoutExpired:
         out, exit_code = "", "timeout"
     _stop_group(proc)                                  # nothing may keep working (or spending) during scoring
+    _stop_in(folder)
     secs = round(time.time() - t0, 1)
     time.sleep(2)   # let the agents finish writing their logs
     end_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")

@@ -32,26 +32,43 @@ def find(project_root=None, explicit=None):
     return USER_MODELS if USER_MODELS.is_file() else None
 
 
+TEMPLATE_HEADINGS = {"# who does what", "## notes for the lead"}
+
+
 def _cells(line):
-    return [c.strip().strip("`") for c in line.strip().strip("|").split("|")]
+    """Split a table row on unescaped pipes; `\\|` stays a pipe inside the cell."""
+    parts = re.split(r"(?<!\\)\|", line.strip().strip("|") if not line.strip().endswith("\\|") else line.strip()[1:])
+    return [c.replace("\\|", "|").strip().strip("`").strip() for c in parts]
 
 
 def _spec(words):
     """'claude opus high' / 'opus high' -> (agent or None, model, effort or None)."""
-    words = [w.strip(",.").lower() for w in words.split()]
+    words = [w.strip(",.`*").lower() for w in words.replace("`", " ").split()]
     agent = words.pop(0) if words and words[0] in AGENTS else None
     effort = words.pop() if words and words[-1] in EFFORT else None
     return agent, " ".join(words), effort
 
 
 def parse(text):
-    rows, settings, notes = [], {}, []
-    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)       # comments are for people, not the lead
+    """{"rows", "settings", "notes", "warnings"}. Nothing is silently dropped: anything Claudex can't use is
+    reported in warnings, with its line number."""
+    rows, settings, notes, warnings = [], {}, [], []
+    text = re.sub(r"<!--.*?-->", lambda m: "\n" * m.group(0).count("\n"), text, flags=re.S)  # keep line numbers
     lines = text.splitlines()
-    i = 0
+    i, fenced = 0, False
     while i < len(lines):
-        line = lines[i]
-        if line.strip().startswith("|") and i + 1 < len(lines) and set(lines[i + 1].replace("|", "").strip()) <= set("-: "):
+        line, num = lines[i], i + 1
+        if line.strip().startswith("```"):
+            fenced = not fenced                       # examples in code blocks are not settings
+            notes.append(line.rstrip())
+            i += 1
+            continue
+        if fenced:
+            notes.append(line.rstrip())
+            i += 1
+            continue
+        if line.strip().startswith("|") and i + 1 < len(lines) and set(lines[i + 1].replace("|", "").strip()) <= set("-: ") \
+                and lines[i + 1].strip():
             header = [h.lower() for h in _cells(line)]
             i += 2
             while i < len(lines) and lines[i].strip().startswith("|"):
@@ -60,20 +77,28 @@ def parse(text):
                 agent = (c.get("agent") or c.get("who") or "").lower()
                 model = c.get("model") or ""
                 effort = (c.get("reasoning") or c.get("effort") or "medium").lower()
-                if when and agent in AGENTS and model and effort in EFFORT:
+                problem = (not when and "no 'When'") or (agent not in AGENTS and f"agent '{agent}' isn't claude or codex") \
+                    or (not model and "no model") or (effort not in EFFORT and f"reasoning '{effort}' isn't one of {', '.join(EFFORT)}")
+                if problem:
+                    warnings.append(f"line {i + 1}: table row skipped: {problem}")
+                else:
                     use = {"agent": agent, "model": model, "effort": effort}
-                    if "browser" in (c.get("browser") or "").lower() or "yes" == (c.get("browser") or "").lower():
+                    if (c.get("browser") or "").strip().lower() in ("yes", "y", "true", "browser"):
                         use["browser"] = True
                     rows.append({"when": when, "use": use})
                 i += 1
             continue
         m = _SETTING.match(line)
         if m:
-            settings[m.group(1).lower()] = _spec(m.group(2))
-        elif line.strip() and not line.lstrip().startswith("#"):
+            spec = _spec(m.group(2))
+            if not spec[1] and not spec[2]:
+                warnings.append(f"line {num}: '{m.group(1)}' has no model or reasoning")
+            else:
+                settings[m.group(1).lower()] = spec
+        elif line.strip() and line.strip().lower() not in TEMPLATE_HEADINGS:
             notes.append(line.rstrip())
         i += 1
-    return {"rows": rows, "settings": settings, "notes": "\n".join(notes).strip()}
+    return {"rows": rows, "settings": settings, "notes": "\n".join(notes).strip(), "warnings": warnings}
 
 
 def apply(rules, path):
@@ -84,6 +109,7 @@ def apply(rules, path):
     rules = dict(rules)
     if m["rows"]:
         rules["rule"] = m["rows"]
+    rules["_models_warnings"] = m["warnings"]
     s = m["settings"]
 
     def put(section, key, spec, default_agent):
@@ -140,6 +166,10 @@ def render(rules):
         out.append(f"Codex reviewer: {rv['codex']['model']} {rv['codex']['effort']}")
     if g:
         out.append(f"Gatekeeper: {g.get('agent', 'claude')} {g.get('model', 'sonnet')} {g.get('effort', 'low')}")
-    out += ["", "## Notes for the lead", "",
-            "<!-- For example: - Anything touching the database goes to Codex Astra, high. -->", ""]
+    out += ["", "## Notes for the lead", ""]
+    if rules.get("_lead_notes"):
+        out.append(rules["_lead_notes"])         # keep the guidance already in force
+    else:
+        out.append("<!-- For example: - Anything touching the database goes to Codex Astra, high. -->")
+    out.append("")
     return "\n".join(out)
