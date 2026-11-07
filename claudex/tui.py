@@ -890,7 +890,10 @@ class TUI:
             self._add("sys", f"\n_Running /{cmd}…_\n")
             extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
                      "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"],
-                     "models": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])}.get(cmd, [])
+                     "models": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])
+                     + (["--global"] if "--global" in arg.split() else []),
+                     "doctor": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])
+                     + (["--live"] if "--live" in arg.split() else [])}.get(cmd, [])
             args, env = self_command(cmd, *extra, *(arg.split() if cmd == "memory" else []), rules=e.rules_path)
             proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT, env=env,

@@ -122,7 +122,7 @@ def stale_workers():
             rows[parts[0]] = parts
     for pid, ppid, etimes, args in rows.values():
         prog = os.path.basename(args.split()[0]) if args.split() else ""
-        if prog.startswith("python") and "claudex" in args and args.rstrip().endswith("--acp"):
+        if prog.startswith("python") and "claudex" in args and "--acp" in args.split():
             started = time.time() - int(etimes)
             if started < stamp:
                 parent = rows.get(ppid, ["", "", "", ""])[3]

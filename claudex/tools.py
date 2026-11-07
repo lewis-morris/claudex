@@ -115,7 +115,7 @@ def codex_catalog():
         return {}
 
 
-def doctor(live=False):
+def doctor(live=False, cwd=None, models_file=None):
     problems = 0
     unverified = set()
 
@@ -151,8 +151,9 @@ def doctor(live=False):
     print("\nRules")
     try:
         from .engine import repo_root
-        here = repo_root(os.getcwd()) or os.getcwd()
-        rules = load_rules(project_root=here)       # exactly what a job here would use, models.md included
+        start = cwd or os.getcwd()
+        here = repo_root(start) or start
+        rules = load_rules(project_root=here, models_file=models_file)   # exactly what a job there would use
         line(OK, f"{rules_file()}" + ("  (the defaults)" if rules_file() == DEFAULT_RULES else ""))
         if rules.get("_models_file"):
             line(OK, f"who does what: {rules['_models_file']}")
@@ -297,9 +298,12 @@ def _self_update():
         if dirty:
             return ["echo", f"Claudex at {root} has uncommitted changes, so it wasn't pulled"]
         return ["git", "-C", str(root), "pull", "--ff-only"]
-    if shutil.which("uv"):
+    where = str(PACKAGE).replace("\\", "/")
+    if "/uv/tools/claudex/" in where and shutil.which("uv"):
         return ["uv", "tool", "upgrade", "claudex"]
-    return ["echo", "Update Claudex with however you installed it (pipx upgrade claudex, …)"]
+    if "/pipx/venvs/claudex/" in where and shutil.which("pipx"):
+        return ["pipx", "upgrade", "claudex"]
+    return ["echo", f"Claudex at {where}: update it the way you installed it"]
 
 
 def update():
@@ -318,6 +322,8 @@ def main(argv):
     sub = ap.add_subparsers(dest="cmd", required=True)
     d = sub.add_parser("doctor", help="check logins, versions, connectors and models")
     d.add_argument("--live", action="store_true", help="also send a tiny message to every model")
+    d.add_argument("--cwd", default=None, help="check the setup a job in this folder would use")
+    d.add_argument("--models", metavar="FILE", help="check this models.md")
     r = sub.add_parser("rules", help="show who does what")
     r.add_argument("--edit", action="store_true")
     lg = sub.add_parser("log", help="recent steps in this project")
@@ -366,7 +372,7 @@ def main(argv):
     li.add_argument("--again", action="store_true", help="sign in again even if already signed in")
     a = ap.parse_args(argv)
     if a.cmd == "doctor":
-        return doctor(a.live)
+        return doctor(a.live, a.cwd, a.models)
     if a.cmd == "rules":
         return show_rules(a.edit)
     if a.cmd == "log":

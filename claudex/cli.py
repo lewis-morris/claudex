@@ -181,7 +181,10 @@ async def handle_command(line, eng, skills):
     elif cmd in ("rules", "doctor", "log", "models", "shared", "memory", "permissions", "init", "usage"):
         extra = {"log": ["--cwd", eng.cwd], "shared": ["--cwd", eng.cwd], "memory": ["--cwd", eng.cwd],
                  "permissions": ["--cwd", eng.cwd], "init": ["--cwd", eng.cwd],
-                 "models": ["--cwd", eng.cwd] + (["--models", eng.models_file] if eng.models_file else []),
+                 "models": ["--cwd", eng.cwd] + (["--models", eng.models_file] if eng.models_file else [])
+                 + (["--global"] if "--global" in arg.split() else []),
+                 "doctor": ["--cwd", eng.cwd] + (["--models", eng.models_file] if eng.models_file else [])
+                 + (["--live"] if "--live" in arg.split() else []),
                  "usage": ["--web"] if arg == "web" else []}.get(cmd, [])
         await asyncio.get_running_loop().run_in_executor(None, lambda: run_tool(cmd, *extra, rules=eng.rules_path))
     else:

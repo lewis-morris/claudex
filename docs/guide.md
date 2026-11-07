@@ -38,7 +38,8 @@ tiny message to each model to prove it answers.
 
 <img src="images/cli-doctor.png" alt="claudex doctor: logins, rules, worker connectors and models all ticked" width="760">
 
-Keep it current with `claudex update` (updates Claude, Codex and both connectors, then runs `doctor`).
+Keep it current with `claudex update`: it updates Claudex itself, Claude, Codex and both connectors, then
+runs `doctor`.
 
 ## 2. Set a project up
 
@@ -194,6 +195,11 @@ Everyone (the lead, the second opinion, both workers, both checkers, the final c
 
 <img src="images/cli-usage.png" alt="claudex usage: a coloured bar chart per day, totals, top projects and Claudex roles (example data)" width="760">
 
+Below the chart it shows **who did the work, and why**: for each agent and model, how many parts it finished
+in Claudex jobs, the minutes it spent, how often the other agent's check sent work back, and the lead's most
+common reasons for picking it. Then the checks that ran (second opinions, final checks, usage limits) and who
+answered permission questions (rules, the gatekeeper, you).
+
 `claudex usage --web` opens the same as a live web page (add `--lan` to see it from your phone);
 `--json` gives raw numbers; `--project .` limits it to one folder. In the chat: `/usage` and `/usage web`.
 
@@ -240,6 +246,10 @@ claudex = "claudex --acp"
 
 Pick **claudex** for a session: Routing, Effort, Mode and Checks are pickers, and the `/` menu has the same
 commands (`/models`, `/permissions`, `/usage`, `/memory`, `/shared`, `/init`…) and your skills.
+
+**Keeping sessions current.** A new session always runs the Claudex you have now. One that was already open
+when Claudex changed tells you before its next job; `claudex doctor` lists every such session with the command
+to restart it (`aoe acp stop <id>`: it comes straight back on your next message).
 
 ---
 

@@ -157,7 +157,8 @@ def render(rules):
            "| When | Agent | Model | Reasoning | Browser |", "|---|---|---|---|---|"]
     for r in rules.get("rule", []):
         u = r["use"]
-        out.append(f"| {r['when']} | {u['agent']} | {u['model']} | {u['effort']} | {'yes' if u.get('browser') else ''} |")
+        when = r["when"].replace("|", "\\|")      # keep a | in the text from splitting the row
+        out.append(f"| {when} | {u['agent']} | {u['model']} | {u['effort']} | {'yes' if u.get('browser') else ''} |")
     out += ["", f"Lead: {lead.get('agent', 'claude')} {lead['model']} {lead['effort']}",
             f"Default: {d['agent']} {d['model']} {d['effort']}"]
     if rv.get("claude"):

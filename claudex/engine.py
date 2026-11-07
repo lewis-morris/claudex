@@ -397,7 +397,7 @@ class Engine:
 
         if self.mode == "ask":
             return await human("you chose to approve everything yourself")
-        in_force = [self.rules_path, self.models_file, rules.get("_models_file")]
+        in_force = [self.rules_path or str(rules_file()), self.models_file, rules.get("_models_file")]
         decision, pattern = permissions.rule_decision(rules, kind, command, paths, self.project_root, in_force)
         if decision in ("allow", "deny"):
             if decision == "deny":

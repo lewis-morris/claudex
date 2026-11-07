@@ -1338,3 +1338,59 @@ def test_bench_stops_everything_left_in_the_folder(tmp_path):
     p = subprocess.Popen(["sleep", "60"], cwd=tmp_path, start_new_session=True)   # like a worker in its own group
     bench._stop_in(tmp_path)
     assert p.wait(timeout=10) is not None
+
+
+def test_bench_stops_marked_processes_that_wandered_off(tmp_path):
+    from claudex import bench
+    env = dict(os.environ, **{bench.MARK: "run123"})
+    p = subprocess.Popen(["sleep", "60"], cwd="/", env=env, start_new_session=True)   # left the folder, own group
+    bench._stop_in(tmp_path, "run123")
+    assert p.wait(timeout=10) is not None
+
+
+@pytest.mark.parametrize("cmd", ["git difftool --no-prompt --extcmd=touch a b", "git diff-tree HEAD",
+                                 "git logx", "git log --ext-diff"])
+def test_git_lookalikes_arent_allowed(cmd, tmp_path):
+    r = engine.load_rules()
+    k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": cmd}}, str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path))[0] is None
+
+
+def test_env_chosen_rules_are_protected(job, monkeypatch, tmp_path):
+    repo, calls, answers = job
+    custom = repo / "custom.toml"
+    custom.write_text((pathlib.Path(engine.__file__).parent / "rules.toml").read_text())
+    monkeypatch.setenv("CLAUDEX_RULES", str(custom))
+    e = engine.Engine(str(repo), UI(), settings={"mode": "auto"}, session_key="t")
+    e._rules = engine.load_rules(project_root=repo)
+    out = asyncio.run(e.decide_permission("codex", _req("edit", paths=[str(custom)])))
+    assert out["outcome"]["optionId"] == "n"
+
+
+def test_render_keeps_pipes(tmp_path):
+    from claudex import models
+    r = engine.load_rules()
+    r["rule"] = [{"when": "VAT | invoices", "use": {"agent": "codex", "model": "gpt-6-astra", "effort": "high"}}]
+    assert models.parse(models.render(r))["rows"][0]["when"] == "VAT | invoices"
+
+
+def test_escalated_model_gets_the_credit(job, monkeypatch, tmp_path):
+    from claudex import usage
+    monkeypatch.setattr(usage, "PROJECTS", tmp_path / "projects.json")
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex", "gpt-6.1-sol", "medium")], "big_decisions": [], "concern_responses": []}
+    fix = {"verdict": "fix", "issues": ["x"], "summary": ""}
+    answers["review"] = [dict(fix), dict(fix), {"verdict": "pass", "issues": [], "summary": ""}]
+    FakeChild.script = [("a.py", "1\n", "a"), ("a.py", "2\n", "b"), ("a.py", "3\n", "c")]
+    run(repo)
+    w = {a["who"]: a for a in usage.work_report("2000-01-01")["workers"]}
+    assert w["codex · gpt-6.1-sol · high"]["steps"] == 1 and w["codex · gpt-6.1-sol · medium"]["sent_back"] == 2
+
+
+def test_stale_detection_finds_acp_anywhere(monkeypatch):
+    from claudex import paths
+    import types
+    fake = "  PID  PPID ELAPSED ARGS\n 10 1 9999 python3 -I -c x /home/x/claudex --acp --models team.md\n"
+    monkeypatch.setattr(paths, "code_stamp", lambda: 9e12)
+    monkeypatch.setitem(sys.modules, "subprocess", types.SimpleNamespace(run=lambda *a, **k: types.SimpleNamespace(stdout=fake)))
+    assert paths.stale_workers() and paths.stale_workers()[0][0] == 10

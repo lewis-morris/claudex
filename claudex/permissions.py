@@ -79,7 +79,8 @@ def _operands(command):
 # Per-program options that write files, run other programs, or force/destroy. An allow rule can't vouch for them.
 PROGRAM_RISKS = {
     "git": ("--output", "-o", "--ext-diff", "--exec", "--upload-pack", "--receive-pack", "-c", "--config-env",
-            "--git-dir", "--work-tree", "-C"),
+            "--git-dir", "--work-tree", "-C", "--extcmd", "-x", "--tool", "--textconv", "--open-files-in-pager",
+            "-O"),
     "rg": ("--pre", "--pre-glob", "--search-zip", "-z"),
     "grep": ("--include-dir",),
     "tail": (), "head": (), "cat": (), "ls": (), "wc": (),
@@ -103,6 +104,8 @@ def _risky(command):
     bad = PROGRAM_RISKS.get(prog, ())
     if any(w == b or w.startswith(b + "=") or (b.startswith("--") and w.startswith(b)) for w in args for b in bad):
         return True
+    if prog == "git" and args[:1] and args[0] not in ("status", "diff", "log", "show", "branch", "add"):
+        return True                    # only the git sub-commands the default rules mean, nothing that looks like them
     if prog == "git" and args[:1] == ["branch"]:
         for w in args[1:]:
             if w.startswith("--") and w not in ("--list", "--all", "--verbose", "--remotes", "--show-current"):

@@ -223,13 +223,16 @@ def work_report(since, project=None):
                     a = by.setdefault(key, {"who": key, "agent": r.get("agent"), "steps": 0, "tries": 0,
                                             "secs": 0.0, "sent_back": 0, "projects": set()})
                     a["tries"] += 1
-                    a["steps"] += 1 if r.get("attempt", 1) == 1 else 0
                     a["secs"] += float(r.get("secs") or 0)
-                    a["sent_back"] += 1 if r.get("verdict") == "fix" else 0
                     a["projects"].add(pathlib.Path(root).name)
-                    why = (r.get("why") or r.get("title") or "").split(" (handed")[0].strip()
-                    if r.get("attempt", 1) == 1 and why:
-                        reasons[key][why[:110]] += 1
+                    verdict = r.get("verdict")
+                    if verdict == "fix":
+                        a["sent_back"] += 1
+                    elif verdict in ("pass", "no_changes", "not_reviewed", "unreviewed", None):
+                        a["steps"] += 1      # whoever finished a part gets the credit, whichever try it was
+                        why = (r.get("why") or r.get("title") or "").strip()
+                        if why:
+                            reasons[key][why[:140]] += 1
                 elif kind in ("second_opinion", "final_check"):
                     checks[f"{kind.replace('_', ' ')}: {r.get('verdict')}"] += 1
                 elif kind == "usage_limit":

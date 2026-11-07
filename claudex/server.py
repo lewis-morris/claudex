@@ -153,7 +153,10 @@ class Server:
         if cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "usage", "models"):
             extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
                      "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"],
-                     "models": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])}.get(cmd, [])
+                     "models": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])
+                     + (["--global"] if "--global" in rest.split() else []),
+                     "doctor": ["--cwd", e.cwd] + (["--models", e.models_file] if e.models_file else [])
+                     + (["--live"] if "--live" in rest.split() else [])}.get(cmd, [])
             args, env = self_command(cmd, *extra, rules=e.rules_path)
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.STDOUT, env=env,

@@ -148,7 +148,9 @@ $ claudex permissions
 ## Usage across both agents
 
 `claudex usage` draws a coloured chart of tokens by day, project, model and Claudex role, read from both agents'
-own logs plus Claudex's one-shot calls. `claudex usage --web` opens a live page (add `--lan` to see it on your
+own logs plus Claudex's one-shot calls. It also shows **who did the work, and why**: how many parts each agent
+and model finished in Claudex jobs, how long they took, how often the check sent work back, and the lead's
+most common reasons for choosing them; plus the checks run and who answered permission questions. `claudex usage --web` opens a live page (add `--lan` to see it on your
 phone); `--json` gives raw numbers. In the chat: `/usage`, `/usage web`.
 
 <img src="docs/images/usage-web.png" alt="The Claudex usage page (example data): totals for Claude and Codex, a stacked bar chart by day, and tables by project, model and Claudex role" width="100%">
@@ -163,6 +165,23 @@ unattended in a fresh folder:
 - **Hidden tests** it never saw decide the main score (% passing).
 - **Two blind reviewers** (Claude Opus and Codex Astra) mark an anonymous copy out of 10.
 - **Time** and **tokens** (from both agents' logs for that folder) show the cost.
+
+**First results** (7 Nov 2026, one run each, so treat as a first look, not a verdict):
+
+| Task | Contender | Hidden tests | Blind review /10 | Minutes | Tokens |
+|---|---|---|---|---|---|
+| Clean a messy customer CSV | Claude | 100% | 8.5 | 1.0 | 68k |
+| | Codex | 100% | **9.0** | 1.0 | **22k** |
+| | Claudex | 100% | 8.0 | 2.5 | 172k |
+| VAT quote + quote page | Claude | 100% | 9.0 | 0.8 | 64k |
+| | Codex | 100% | **9.5** | 0.9 | **22k** |
+| | Claudex | 100% | 9.0 | 3.4 | 318k |
+
+On small, one-sitting jobs like these, a single agent was just as correct, faster and far cheaper: Claudex's
+planning, second opinions and cross-checks cost 3–4× the time and 8–14× Codex's tokens without improving the
+result. That's worth knowing. Claudex is built for bigger, multi-part jobs where one agent's blind spots
+matter, and those aren't benchmarked yet. For small jobs, send them straight to one agent (`@codex …`) or use
+`--checks off`. Add harder tasks of your own and run `--runs 3` to see where your work falls.
 
 It writes `report.md`, `report.html` and `results.json` to `~/.local/share/claudex/bench/`. Tasks live in
 [`claudex/bench_tasks/`](claudex/bench_tasks): a brief, a starter project, and hidden tests. Add your own.
@@ -285,6 +304,11 @@ claudex = "claudex --acp"
 ```
 
 Pick **claudex** for a new session: you get Routing, Effort, Mode and Checks pickers, and the same `/` menu.
+
+New sessions always run the Claudex you have now. A session that was already open when Claudex changed says
+so before its next job, and `claudex doctor` lists any such sessions with the command to restart each
+(`aoe acp stop <id>`; it comes back on your next message). `claudex update` updates Claudex itself as well as
+Claude, Codex and the connectors.
 
 ## Safety
 

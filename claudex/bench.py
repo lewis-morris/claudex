@@ -178,22 +178,37 @@ def _stop_group(proc):
         pass
 
 
-def _stop_in(folder):
-    """Stop every process still working in this folder. Claudex's workers run in their own process groups, so
-    stopping the contender's group isn't enough; anything whose working folder is inside it is ours to stop."""
+MARK = "CLAUDEX_BENCH_RUN"
+
+
+def _stop_in(folder, mark=None):
+    """Stop every process this run left behind. Claudex's workers run in their own process groups, so stopping
+    the contender's group isn't enough: anything carrying this run's marker (every process it started inherits
+    it), or still working inside the folder, is ours to stop. Needs Linux's /proc; elsewhere it's best effort."""
     import signal
+    if not os.path.isdir("/proc"):
+        return
     root = str(pathlib.Path(folder).resolve())
     me = os.getpid()
+    needle = f"{MARK}={mark}".encode() if mark else None
     for attempt in range(3):
         found = []
         for d in pathlib.Path("/proc").iterdir():
             if not d.name.isdigit() or int(d.name) == me:
                 continue
-            try:
-                cwd = os.readlink(d / "cwd")
-            except OSError:
-                continue
-            if cwd == root or cwd.startswith(root + "/"):
+            ours = False
+            if needle:
+                try:
+                    ours = needle in (d / "environ").read_bytes()
+                except OSError:
+                    pass
+            if not ours:
+                try:
+                    cwd = os.readlink(d / "cwd")
+                    ours = cwd == root or cwd.startswith(root + "/")
+                except OSError:
+                    pass
+            if ours:
                 found.append(int(d.name))
         if not found:
             return
@@ -213,16 +228,17 @@ def run_one(task_name, task, arm, n, stamp, timeout_min, judge_it):
     print(f"  {task_name} · {arm} · run {n}: working…", flush=True)
     start_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     t0 = time.time()
+    mark = uuid.uuid4().hex
     proc = subprocess.Popen(command(arm, task["brief"], folder), cwd=folder, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True, env=tool_env(), stdin=subprocess.DEVNULL,
-                            start_new_session=True)   # its own group: everything it starts can be stopped
+                            stderr=subprocess.PIPE, text=True, env=tool_env({MARK: mark}), stdin=subprocess.DEVNULL,
+                            start_new_session=True)   # its own group, and a marker every descendant inherits
     try:
         out, _ = proc.communicate(timeout=timeout_min * 60)
         exit_code = proc.returncode
     except subprocess.TimeoutExpired:
         out, exit_code = "", "timeout"
     _stop_group(proc)                                  # nothing may keep working (or spending) during scoring
-    _stop_in(folder)
+    _stop_in(folder, mark)
     secs = round(time.time() - t0, 1)
     time.sleep(2)   # let the agents finish writing their logs
     end_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
