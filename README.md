@@ -31,15 +31,24 @@ need both, and the best results come when someone *else* checks the work. Claude
   money logic, new dependencies, contracts between parts. The lead answers every concern in writing.
 - **Workers take turns**: one part at a time, each in its own real Claude Code or Codex session.
 - **Every change is reviewed by the other agent.** Problems go back to the same worker; if they keep failing,
-  it steps up to a stronger model; then it stops and tells you what's still wrong.
+  it steps up to a stronger model; then it stops and tells you what's still wrong. (If the other agent is at
+  its usage limit, the same side checks instead, and Claudex says so in bold.)
 - **One shared memory.** Everyone (lead, workers, reviewers) sees the same project map, past decisions,
   a journal of every job from every session, each worker's handover, and *both* `CLAUDE.md` and `AGENTS.md`.
-- **Usage limits handled.** If one agent runs out, the other picks up the part with a recap. If both are out,
-  it stops and tells you when each resets.
+- **Usage limits handled.** If one agent runs out mid-job, the other finishes that part with a recap of what
+  was done, and the check covers both agents' changes. If both are out, it stops and tells you when each
+  resets (when the tool says). Send a job to one agent on purpose (`@codex …`) and it's never switched.
 
 ## What it looks like
 
 <img src="docs/images/screen-working.png" alt="The Claudex full-screen app mid-job: monkeys on top, conversation on the left showing the plan, big decisions and a second opinion, the plan on the right" width="100%">
+
+<details>
+<summary>…and when the job's done</summary>
+
+<img src="docs/images/screen-done.png" alt="The end of a real job: Claude's check of the sums passed, Codex's check of the page passed, and the lead's final check says all good" width="100%">
+
+</details>
 
 The monkeys act out what's happening: both scratch their heads while the lead plans, the one working taps at
 a little laptop while the other watches, a banana flies across when work goes to be checked, a thumbs-up or a
@@ -68,7 +77,8 @@ claudex login      # signs in to whichever of Claude / Codex isn't signed in yet
 claudex doctor     # checks logins, connectors and every model in the rules
 ```
 
-Or run it straight from a checkout: `git clone … && claudex/bin/claudex`.
+Or run it straight from a checkout: `git clone https://github.com/lewis-morris/claudex && claudex/bin/claudex`
+(that needs Python 3.11+ with `prompt_toolkit`; it tells you how to get it if it's missing).
 
 ## Use
 
@@ -164,14 +174,14 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 
 | File | What |
 |---|---|
-| `project/map.md` | how the project is laid out, refreshed after each job |
+| `project/map.md` | how the project is laid out, refreshed after each job that changed files |
 | `project/decisions.md` | big decisions, second opinions, and the lead's answer to each concern |
 | `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
 | `sessions/<id>/notes.md` | this session's requests, handovers and reviews (long handovers saved whole) |
 | `sessions/<id>/steps.jsonl` | agent, model, reasoning, time and verdict for every step |
 
-Every role gets the same memory, plus your project's `CLAUDE.md` **and** `AGENTS.md` in full, so both agents
-follow one set of house rules. A test (`test_everyone_shares_one_memory`) proves it across two sessions.
+Every role gets the same memory, plus your project's `CLAUDE.md` **and** `AGENTS.md` (in full; a file over
+40,000 characters comes with an instruction to read the rest), so both agents follow one set of house rules. A test (`test_everyone_shares_one_memory`) proves it across two sessions.
 
 ## Browser
 
@@ -200,14 +210,16 @@ Pick **claudex** for a new session: you get Routing, Effort, Mode and Checks pic
   switched off.
 - **Snapshots never touch your git index**: Claudex compares files using a private temporary index.
 - **It never commits or pushes** unless you ask a worker to.
-- **If a check can't run** (signed out, timed out), the job stops rather than pretending it passed.
+- **If a check can't run** (signed out, timed out), the job stops rather than pretending it passed. If it
+  can't run because of a usage limit, the other side's strongest model checks instead, flagged as not
+  independent.
 - Workers run with the permission mode you choose (`--mode`); the default `auto` uses each agent's own
   safety checks.
 
 ## Development
 
 ```bash
-uv run --no-project --with pytest --with prompt_toolkit python -m pytest -q    # 60 tests, no models called
+uv run --no-project --with pytest --with prompt_toolkit python -m pytest -q    # 71 tests, no models called
 ```
 
 The tests use stand-in agents, so they're free and fast. Design notes and the review history are in

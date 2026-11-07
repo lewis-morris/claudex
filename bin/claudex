@@ -1,7 +1,13 @@
 #!/bin/sh
-# Run Claudex straight from a checkout (no install needed): `bin/claudex`, or link it onto your PATH.
-# Uses the system Python by default; set CLAUDEX_PYTHON to use another (it needs prompt_toolkit).
+# Run Claudex straight from a checkout (no install): `bin/claudex`, or link this file onto your PATH.
+# It needs Python 3.11+ with prompt_toolkit. Set CLAUDEX_PYTHON to pick a different Python.
 SELF=$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")
 ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
 PY=${CLAUDEX_PYTHON:-python3}
-exec "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$ROOT" "$@"
+if ! "$PY" -c 'import sys, prompt_toolkit; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+    echo "Claudex needs Python 3.11+ with prompt_toolkit. Either install it properly:" >&2
+    echo "    uv tool install $ROOT        (or: pipx install $ROOT)" >&2
+    echo "or give this Python what it needs:  $PY -m pip install --user prompt_toolkit" >&2
+    exit 1
+fi
+exec "$PY" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$ROOT" "$@"

@@ -903,3 +903,122 @@ def test_browser_step_cant_go_to_codex_when_claude_is_limited(job, monkeypatch, 
     FakeChild.script = [(None, "", "Claude usage limit reached")]
     e, ui, stop = run(repo)
     assert not e.ok and "signed-in Chrome" in ui.all() and len(FakeChild.started) == 1
+
+
+# ---------- Codex's pre-publication review ----------
+from claudex import limits  # noqa: E402
+
+
+def test_limit_phrases_real_notices_vs_ordinary_prose():
+    assert limits.reply_is_limit("…done the first half.\nYou've hit your 5-hour limit · resets 3pm")
+    assert limits.reply_is_limit("You're out of extra usage.")
+    assert limits.reply_is_limit("Claude AI usage limit reached|1762300000")
+    assert not limits.reply_is_limit("HTTP 429 means Too Many Requests; retry with exponential backoff.")
+    assert not limits.reply_is_limit("Added a rate limiter that returns 429 when the limit is reached.")
+    assert limits.reset_hint("You've hit your limit · resets 3pm") == "3pm"
+    assert limits.reset_hint("Rate limit reached. Try again in 2 hours.") == "2 hours"
+    assert limits.error_is_limit("429 Too Many Requests") and not limits.error_is_limit("file not found")
+
+
+def test_handover_reviews_both_agents_edits(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("half.py", "x = 1\n", "Wrote half.py.\nYou've hit your usage limit. Resets at 5pm."),
+                        (None, "", "Checked half.py; it's complete, nothing more to do.")]
+    e, ui, stop = run(repo)
+    reviews = [c for c in calls if c[0] == "review"]
+    assert e.ok and reviews and "half.py" in reviews[0][4]          # the first agent's edit was still checked
+
+
+def test_limit_after_partial_edits_is_caught(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    long = "Working through it.\n" + "detail\n" * 300 + "You've hit your usage limit · resets 3pm"
+    FakeChild.script = [("a.py", "1\n", long), ("a.py", "2\n", "Finished it.")]
+    e, ui, stop = run(repo)
+    assert [w.name for w in FakeChild.started][:2] == ["codex", "claude"] and e.ok
+
+
+def test_explaining_429_is_not_a_limit(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    FakeChild.script = [(None, "", "HTTP 429 means Too Many Requests; retry with exponential backoff.")]
+    e, ui, stop = run(repo)
+    assert e.ok and [w.name for w in FakeChild.started] == ["codex"] and not e.limited
+
+
+def test_headless_keeps_the_reason_and_rejects_failed_runs(monkeypatch, tmp_path):
+    async def fake_run(cmd, cwd, stdin_text, timeout):
+        if cmd[0] == "claude":
+            return 1, json.dumps({"is_error": True, "subtype": "error_during_execution",
+                                  "errors": ["rate_limit_error: You've hit your usage limit"]}), ""
+        out = cmd[cmd.index("-o") + 1]
+        pathlib.Path(out).write_text('{"verdict": "pass", "issues": [], "summary": ""}')
+        return 2, "", "codex: stream error 429 Too Many Requests"
+    monkeypatch.setattr(headless, "_run", fake_run)
+    for agent in ("claude", "codex"):
+        with pytest.raises(headless.HeadlessError) as err:
+            asyncio.run(headless.ask(agent, str(tmp_path), "x", engine.REVIEW_SCHEMA, "m", "high"))
+        assert err.value.limit, agent
+
+
+def test_recap_includes_what_the_first_agent_said_before_an_error(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+
+    async def dies(child):
+        child._text = ["Migrated the orders table; still to do: the invoices table."]
+        raise RuntimeError("429 Too Many Requests")
+    FakeChild.script = [dies, ("x.py", "1\n", "Did the invoices table.")]
+    e, ui, stop = run(repo)
+    assert e.ok and "still to do: the invoices table" in FakeChild.started[1].prompts[0]
+
+
+def test_you_chose_codex_only_so_no_handover(job):
+    repo, calls, answers = job
+    FakeChild.script = [(None, "", "You've hit your usage limit. Resets at 5pm.")]
+    e, ui, stop = run(repo, text="@codex sort the invoices")
+    assert not e.ok and "Codex only" in ui.all() and [w.name for w in FakeChild.started] == ["codex"]
+
+
+def test_same_side_second_opinion_is_flagged(job):
+    repo, calls, answers = job
+    plan = {"steps": [step("claude", "sonnet", "low")], "big_decisions": [
+        {"decision": "x", "why": "y", "alternatives": "z"}], "concern_responses": []}
+    answers["plan"] = [headless.HeadlessError("Claude usage limit reached"), plan]
+    answers["opinion"] = {"verdict": "agree", "concerns": [], "suggestion": ""}
+    FakeChild.script = [(None, "", "ok")]
+    e, ui, stop = run(repo, dry_run=True)
+    assert "Not an independent second opinion" in ui.all()
+
+
+def test_your_path_comes_first(monkeypatch, tmp_path):
+    from claudex import paths
+    monkeypatch.setenv("PATH", f"{tmp_path}:/usr/bin")
+    monkeypatch.delenv("CLAUDEX_NODE_BIN", raising=False)
+    assert paths.tool_env()["PATH"].split(":")[:2] == [str(tmp_path), "/usr/bin"]
+
+
+def test_sub_commands_ignore_a_lookalike_project(tmp_path):
+    from claudex import paths
+    (tmp_path / "claudex").mkdir()
+    (tmp_path / "claudex/__init__.py").write_text("")
+    (tmp_path / "claudex/__main__.py").write_text("print('IMPOSTER')")
+    argv, env = paths.self_command("rules")
+    out = subprocess.run(argv, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60).stdout
+    assert "IMPOSTER" not in out and "Who does what" in out
+
+
+def test_chrome_launcher_quotes_odd_paths(monkeypatch, tmp_path):
+    from claudex import paths
+    odd = tmp_path / "my $claude"
+    odd.write_text("#!/bin/sh\necho ran \"$@\"\n")
+    odd.chmod(0o755)
+    monkeypatch.setattr(paths, "CACHE", tmp_path / "cache")
+    monkeypatch.setattr(paths, "which", lambda n: None if n == "claude-agent-acp" else str(odd))
+    launcher = paths.chrome_launcher()
+    out = subprocess.run([launcher, "hi"], capture_output=True, text=True).stdout
+    assert out.strip() == "ran --chrome hi"

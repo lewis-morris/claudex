@@ -8,11 +8,16 @@ import json
 import os
 import tempfile
 
+from .limits import error_is_limit
 from .paths import tool_env
 
 
 class HeadlessError(Exception):
-    pass
+    """A one-shot call failed. `limit` is True when the failure was the agent running out of usage."""
+
+    def __init__(self, message, limit=None):
+        super().__init__(message)
+        self.limit = error_is_limit(message) if limit is None else limit
 
 
 def _env():
@@ -61,9 +66,13 @@ async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_file
     try:
         data = json.loads(out)
     except Exception:
-        raise HeadlessError(f"claude exited {code}: {(err or out)[-400:]}")
-    if data.get("is_error") or "structured_output" not in data:
-        raise HeadlessError(f"claude: {str(data.get('result') or data.get('subtype'))[:400]}")
+        raise HeadlessError(f"claude exited {code}: {(err or out)[-600:]}")
+    if code != 0 or data.get("is_error") or "structured_output" not in data:
+        # keep every bit of explanation: errors[] often holds the real reason (e.g. a usage limit)
+        parts = [str(data.get("result") or ""), str(data.get("subtype") or "")]
+        parts += [e if isinstance(e, str) else json.dumps(e) for e in (data.get("errors") or [])]
+        detail = " | ".join(x for x in parts if x) or (err or out)[-600:]
+        raise HeadlessError(f"claude: {detail[:800]}")
     return data["structured_output"]
 
 
@@ -73,11 +82,13 @@ async def codex_json(cwd, prompt, schema, model, effort, timeout=900):
         with open(sp, "w") as f:
             json.dump(schema, f)
         code, out, err = await _run(codex_cmd(model, effort, sp, op, cwd), cwd, prompt, timeout)
+        if code != 0:   # never trust an answer from a run that failed
+            raise HeadlessError(f"codex exited {code}: {(err or out)[-800:]}")
         try:
             with open(op) as f:
                 return _first_json(f.read())
         except Exception:
-            raise HeadlessError(f"codex exited {code}: {err[-400:]}")
+            raise HeadlessError(f"codex gave no answer: {(err or out)[-800:]}")
 
 
 async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True):

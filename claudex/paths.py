@@ -2,6 +2,7 @@
 import glob
 import os
 import pathlib
+import shlex
 import shutil
 
 PACKAGE = pathlib.Path(__file__).resolve().parent
@@ -26,8 +27,6 @@ def _version_key(path):
 def tool_dirs():
     """Where `claude`, `codex` and the ACP connectors usually live, best first."""
     dirs = []
-    if os.environ.get("CLAUDEX_NODE_BIN"):
-        dirs.append(os.environ["CLAUDEX_NODE_BIN"])
     node = shutil.which("node")
     if node:
         dirs.append(str(pathlib.Path(node).parent))
@@ -43,8 +42,12 @@ def tool_dirs():
 
 
 def tool_env(extra=None):
+    """Your PATH comes first (so the versions you chose win); common install folders are only fallbacks."""
     env = dict(os.environ)
-    env["PATH"] = os.pathsep.join(tool_dirs() + [env.get("PATH", "")])
+    mine = [d for d in env.get("PATH", "").split(os.pathsep) if d]
+    first = [os.environ["CLAUDEX_NODE_BIN"]] if os.environ.get("CLAUDEX_NODE_BIN") else []
+    fallback = [d for d in tool_dirs() if d not in mine and d not in first]
+    env["PATH"] = os.pathsep.join(first + mine + fallback)
     env.update(extra or {})
     return env
 
@@ -68,7 +71,7 @@ def chrome_launcher():
     if not claude:
         return None
     path = CACHE / "claude-chrome"
-    text = f'#!/bin/sh\n# Made by Claudex: Claude with Claude in Chrome switched on.\nexec "{claude}" --chrome "$@"\n'
+    text = f'#!/bin/sh\n# Made by Claudex: Claude with Claude in Chrome switched on.\nexec {shlex.quote(claude)} --chrome "$@"\n'
     if not path.exists() or path.read_text() != text:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text)
@@ -81,7 +84,10 @@ def self_command(*args, rules=None):
     was installed or is running from a checkout."""
     import sys
     env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join([str(PACKAGE.parent)] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
     if rules:
         env["CLAUDEX_RULES"] = os.path.abspath(rules)
-    return [sys.executable, "-m", "claudex", *args], env
+    # -I: ignore the current folder and PYTHONPATH, so a project with its own "claudex" folder can't stand in;
+    # then load this very copy of Claudex explicitly.
+    boot = ("import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = 'claudex'; "
+            "from claudex.__main__ import main; main()")
+    return [sys.executable, "-I", "-c", boot, str(PACKAGE.parent), *args], env

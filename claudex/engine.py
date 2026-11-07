@@ -109,27 +109,12 @@ class StepFailed(Exception):
 class WorkerLimited(Exception):
     """A worker hit its usage limit partway through a step; the step can go to the other agent."""
 
-    def __init__(self, agent, said):
+    def __init__(self, agent, said, before=None):
         super().__init__(f"{agent} is at its usage limit")
-        self.agent, self.said = agent, said
+        self.agent, self.said, self.before = agent, said, before   # before: the step's starting snapshot
 
 
-# Phrases Claude, Codex and their APIs use when you've run out of usage. Only trusted on errors, or on a
-# short reply that changed no files (so a worker *writing* rate-limit code isn't mistaken for one).
-LIMIT_RE = re.compile(r"usage limit|rate[ -]?limit(?:ed)?|limit (?:has been |was )?reached|hit your (?:\w+ )?limit|"
-                      r"too many requests|\b429\b|quota (?:exceeded|reached)|out of (?:credits|usage)|"
-                      r"reached your (?:\w+ )?(?:limit|quota)|credit balance is too low", re.I)
-RESET_RE = re.compile(r"(?:resets?|try again|available again|back)\s+(?:at|in|after|on)\s+([^\n.;,]{1,40})", re.I)
-SHORT_REPLY = 600
-
-
-def looks_limited(text):
-    return bool(LIMIT_RE.search(text or ""))
-
-
-def reset_hint(text):
-    m = RESET_RE.search(text or "")
-    return m.group(1).strip() if m else None
+from .limits import error_is_limit, reply_is_limit, reset_hint  # noqa: E402
 
 
 class Engine:
@@ -150,6 +135,7 @@ class Engine:
         self.cancelled = False
         self.ok = True
         self.limited = {}           # agent -> (when we noticed, what it said about resetting)
+        self._planned_by = None     # who actually wrote the plan (the lead, or the other side if it was limited)
         self.busy = False
         self.local = None
         self._task = None
@@ -375,7 +361,8 @@ class Engine:
             try:
                 return a, m, e, await headless.ask(a, self.cwd, prompt, schema, m, e, timeout, read_files)
             except Exception as ex:
-                if not looks_limited(str(ex)):
+                limit = getattr(ex, "limit", None)
+                if not (limit if limit is not None else error_is_limit(str(ex))):
                     raise
                 self._mark_limited(a, str(ex))
                 await self.ui.say(f"\n_{self._limit_note(a)}, so {other(a).title()} is taking this one._\n\n")
@@ -429,7 +416,9 @@ class Engine:
             prompt += "\nLeave concern_responses empty.\n"
         agent, model, effort = self._lead(rules)
         timeout = rules.get("limits", {}).get("plan_timeout_min", 10) * 60
-        return (await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout))[3]
+        a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout)
+        self._planned_by = a
+        return answer
 
     def _single(self, text, agent, rules, why):
         d = rules["agent_defaults"][agent]
@@ -437,12 +426,12 @@ class Engine:
         # always has, since nobody planned whether it needs it.
         browser = agent in rules["browser"]["signed_in"]
         return {"steps": [{"title": "Your request", "agent": agent, "model": d["model"], "effort": d["effort"],
-                           "browser": browser, "why": why, "instructions": text}],
+                           "browser": browser, "why": why, "instructions": text, "locked": True}],
                 "big_decisions": [], "concern_responses": []}
 
     async def second_opinion(self, text, plan, rules):
-        lead_agent = self._lead(rules)[0]
-        who = other(lead_agent)
+        planner = self._planned_by or self._lead(rules)[0]
+        who = other(planner)
         r = rules["reviewers"][who]
         prompt = (
             "You are giving a second opinion on a plan another AI lead wrote, before any work starts. You may "
@@ -451,10 +440,7 @@ class Engine:
             f"USER MESSAGE:\n{text}\n\nPLAN:\n{json.dumps(plan, indent=1)}\n\n{self._memory_block()}\n")
         timeout = rules.get("limits", {}).get("check_timeout_min", 15) * 60
         a, m, e, op = await self._ask(who, r["model"], r["effort"], prompt, OPINION_SCHEMA, rules, timeout)
-        if a != who:   # the other side is at its limit: say plainly this isn't a true second opinion
-            op = dict(op, suggestion=(op.get("suggestion") or "") + f" [given by {a.title()}, the same side as the "
-                      f"lead, because {who.title()} is at its usage limit]")
-        return a, {"model": m, "effort": e}, op
+        return a, {"model": m, "effort": e, "independent": a != planner}, op
 
     # ---------- one message ----------
     async def turn(self, text):
@@ -616,12 +602,14 @@ class Engine:
                               f"{other(w.agent).title()} with a recap of what it did._\n\n")
             s2 = self._handover_step(s, rules, "hit its usage limit", w.said)
             try:
-                return await self._run_step(i, n, s2, text, rules)
+                return await self._run_step(i, n, s2, text, rules, before=w.before)
             except WorkerLimited:
                 raise StepFailed(f"both agents are at their usage limits: {self._limits_summary()}. "
                                  "Your work so far is saved; ask again once one of them resets.")
 
     def _can_switch(self, s, rules):
+        if s.get("locked"):        # you chose this agent: never hand it to the other one behind your back
+            return False
         to = other(s["agent"])
         if self._is_limited(to, rules):
             return False
@@ -629,6 +617,9 @@ class Engine:
 
     def _no_switch_reason(self, s, rules):
         to = other(s["agent"])
+        if s.get("locked"):
+            return (f"{self._limit_note(s['agent'])}. You asked for {s['agent'].title()} only, so Claudex won't hand "
+                    f"this to {to.title()}. Try again once it resets, or send it to {to.title()} yourself.")
         if s["browser"] and to not in rules["browser"]["signed_in"]:
             return (f"{self._limit_note(s['agent'])}, and this step needs your signed-in Chrome, which only "
                     f"{s['agent'].title()} can use. Try again once it resets.")
@@ -649,12 +640,17 @@ class Engine:
             await self.ui.say(f"**Stopped before any work:** the second opinion couldn't run ({e}). "
                               "Run `claudex doctor`, or use `--no-second-opinion`.\n")
             return None
+        if not r.get("independent", True):
+            await self.ui.say(f"**⚠ Not an independent second opinion:** {who.title()} also wrote the plan, because "
+                              f"the other side is at its usage limit.\n\n")
         await self.ui.say(f"_Second opinion from {who.title()} {r['model']} ({r['effort']}): "
                           + (f"{fun.pick(fun.AGREE)}_\n\n" if op["verdict"] == "agree" else "some concerns._\n"))
         stamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
         record = f"\n## {stamp} · {text[:120]}\n" + "".join(
             f"- **Decision:** {d['decision']}. Why: {d['why']}. Alternatives: {d['alternatives']}\n" for d in decisions)
-        record += f"- **Second opinion ({who} {r['model']} {r['effort']}):** {op['verdict']}\n"
+        record += (f"- **Second opinion ({who} {r['model']} {r['effort']}):** {op['verdict']}"
+                   + ("" if r.get("independent", True) else " (NOT independent: the other side was at its usage limit)")
+                   + "\n")
         if op["verdict"] == "concerns" and op["concerns"]:
             await self.ui.say("".join(f"- {c}\n" for c in op["concerns"]) + "\n_Re-planning with these in mind…_\n\n")
             record += "".join(f"  - Concern: {c}\n" for c in op["concerns"])
@@ -712,7 +708,7 @@ class Engine:
             raise StepFailed(f"couldn't set {agent.title()}'s permission mode to {wanted}, so it wasn't started.")
         return model
 
-    async def _run_step(self, i, n, s, text, rules):
+    async def _run_step(self, i, n, s, text, rules, before=None):
         """Run one step with review and escalation. Returns True if files changed. Raises StepFailed."""
         name = "claude_browser" if s["browser"] else s["agent"]
         agent = s["agent"]
@@ -728,7 +724,7 @@ class Engine:
             review = rules.get("review", {})
             max_attempts = int(review.get("max_attempts", 3))
             step_timeout = rules.get("limits", {}).get("step_timeout_min", 60) * 60
-            before = gitsnap.snapshot(self.project_root)
+            before = before or gitsnap.snapshot(self.project_root)   # a handover keeps the step's first snapshot
             if before is None and self.reviews_on:
                 raise StepFailed("couldn't take a snapshot of the project files (git failed), so the work "
                                  "couldn't be checked.")
@@ -759,10 +755,17 @@ class Engine:
                     await self._stop_child(name)
                     raise
                 except Exception as e:
+                    partial = "".join(getattr(c, "_text", []) or []).strip()   # what it had said before failing
                     await self._stop_child(name)
-                    if looks_limited(str(e)):
+                    if error_is_limit(str(e)):
+                        said = (partial + "\n\n" if partial else "") + f"[stopped: {e}]"
+                        self._append(self.notes, f"## Step {i}: {s['title']} ({agent} {model} {effort}, attempt "
+                                                 f"{attempt}): stopped at its usage limit\n{said}\n\n")
+                        self._log(kind="step", step=i, title=s["title"], agent=agent, model=model, effort=effort,
+                                  attempt=attempt, stop="error", verdict="usage_limit",
+                                  handoff=self._keep_handover(i, attempt, agent, said))
                         self._mark_limited(agent, str(e))
-                        raise WorkerLimited(agent, str(e))
+                        raise WorkerLimited(agent, said, before)
                     raise StepFailed(f"{agent.title()} stopped with an error: {e}")
                 finally:
                     self.active = None
@@ -792,10 +795,10 @@ class Engine:
                     raise StepFailed("couldn't take a snapshot of the project files after the step (git failed).")
                 diff, files, truncated = gitsnap.diff(self.project_root, before, after,
                                                       int(review.get("diff_limit", 60000)))
-                if not files and len(out.strip()) < SHORT_REPLY and looks_limited(out):
-                    self._log(**row, verdict="usage_limit")      # a short "you've hit your limit" reply
+                if reply_is_limit(out):      # it stopped with a "you've hit your limit" notice
+                    self._log(**row, verdict="usage_limit", files=files)
                     self._mark_limited(agent, out)
-                    raise WorkerLimited(agent, out)
+                    raise WorkerLimited(agent, out, before)
                 if not files:
                     self._log(**row, verdict="no_changes")
                     return False
@@ -845,6 +848,8 @@ class Engine:
             if used != who:
                 v = dict(v, summary=f"(Checked by {used.title()} {m} {ef}, the same side that did the work, "
                                     f"because {who.title()} is at its usage limit.) " + v["summary"])
+                await self.ui.say(f"**⚠ Not an independent check:** {who.title()} is at its usage limit, so "
+                                  f"{used.title()} checked its own side's work. ")
                 who, r = used, {"model": m, "effort": ef}
         except Exception as e:
             if self._carry_on(rules):
