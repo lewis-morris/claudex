@@ -120,6 +120,21 @@ use = { agent = "claude", model = "sonnet", effort = "low" }
 # `claudex permissions` shows these and every recent decision. A project can add its own in .claudex/rules.toml.
 [permissions]
 gatekeeper = { agent = "claude", model = "sonnet", effort = "low" }
+# Installing packages. "project": installs into this project's own environment (.venv, node_modules) just
+# happen; "ask": every install asks you. Installs onto the whole computer (global, --user, brew, cargo install,
+# a bare pip install) always ask. Change it with /permissions installs project|ask.
+installs = "project"
+project_installs = [
+    "run:*.venv/bin/pip install*", "run:*.venv/bin/pip3 install*", "run:*.venv/bin/python* -m pip install*",
+    "run:*venv/bin/pip install*", "run:uv add*", "run:uv pip install*", "run:uv sync*",
+    "run:npm install*", "run:npm i *", "run:npm i", "run:npm ci*", "run:pnpm add*", "run:pnpm install*", "run:pnpm i*",
+    "run:yarn add*", "run:yarn install*", "run:yarn", "run:bun add*", "run:bun install*", "run:poetry add*", "run:poetry install*",
+]
+computer_installs = [
+    "run:pip install*", "run:pip3 install*", "run:python* -m pip install*", "run:* --user*", "run:* -g *", "run:* -g",
+    "run:* --global*", "run:* --system*", "run:* --break-system-packages*", "run:cargo install*", "run:brew install*",
+    "run:pipx install*", "run:npm link*", "run:gem install*", "run:go install*",
+]
 deny = [
     "run:sudo *", "run:* sudo *", "run:su *", "run:doas *",
     "*:~/.ssh*", "*:~/.aws*", "*:~/.gnupg*", "*:~/.config/gh*", "*:~/.netrc*",
@@ -130,8 +145,7 @@ deny = [
 ]
 ask = [
     "run:git push*", "run:*deploy*", "run:*publish*", "run:*release*",
-    "run:pip install*", "run:pip3 install*", "run:npm install*", "run:npm i *", "run:pnpm add*", "run:yarn add*",
-    "run:uv add*", "run:uv pip install*", "run:cargo install*", "run:brew install*", "run:apt*", "run:dnf*",
+    "run:apt*", "run:dnf*",
     "run:ssh *", "run:scp *", "run:rsync *", "run:rm -r*", "run:rm -f*", "run:docker *", "run:kubectl *",
     "run:git branch -d*", "run:git branch -D*", "run:find *",
     "run:psql *", "run:mysql *", "run:redis-cli *", "run:stripe *", "run:aws *", "run:gcloud *", "run:az *",

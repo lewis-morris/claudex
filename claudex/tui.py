@@ -1,6 +1,6 @@
 """Claudex full screen: two cheeky monkeys act out the job while you chat.
 
-F2 monkeys (playful/calm/off × big/small/tiny) · F3 layout · F4 colours · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D quit.
+F2 animation menu (liveliness, size, where, colours) · PgUp/PgDn scroll · Ctrl-C stop the job · Ctrl-D quit.
 Built on prompt_toolkit (already installed); the monkeys are half-block pixels in 24-bit colour.
 """
 import asyncio
@@ -930,8 +930,7 @@ class TUI:
             left = " Ready "
         right = (f" {ROUTES[e.route]} · effort {e.effort} · checks {CHECKS[e.checks]}"
                  + (" · PLAN ONLY" if e.dry_run else "")
-                 + f" · F2 monkeys {self.look_name()} · F3 {LAYOUT_NAMES[self.prefs['layout']]}"
-                 + f" · F4 {self.prefs['palette']} ")
+                 + " · /settings · F2 animation ")
         warn = [("class:danger", " UNRESTRICTED: nothing asks ")] if e.mode == "unrestricted" else []
         return [("class:chip", left)] + warn + [("class:status", right)]
 
@@ -1062,7 +1061,7 @@ class TUI:
 
         @kb.add("f2")
         def _(event):
-            self.cycle_look()
+            self.animation_menu()
 
         @kb.add("f3")
         def _(event):
@@ -1167,8 +1166,8 @@ class TUI:
         elif cmd in ("help", ""):
             rows = [f"**/{n}** {h}  _{d}_" if h else f"**/{n}**  {d}" for n, h, d in COMMANDS]
             rows.append("**@claude …** or **@codex …**  send just that message to one agent")
-            rows.append("**F2** monkeys: playful/calm/off × big/small/tiny (or **/anim calm small**) · **F3** layout · "
-                        "**F4** colours · **PgUp/PgDn** scroll · **Ctrl-C** stop")
+            rows.append("**F2** animation menu: how lively, how big, where, colours · **/settings** everything "
+                        "set for this project · **PgUp/PgDn** scroll · **Ctrl-C** stop")
             rows.append(f"\n**Skills** ({len(self.skills)}): type **$** and start typing a name, e.g. `$deployify ship it`.")
             self._add("sys", "\n" + "\n".join(rows) + "\n")
         elif cmd in ("auto", "claude", "codex"):
@@ -1188,12 +1187,22 @@ class TUI:
             size = next((x for x in words if x in SIZES), None)
             if not (style or size):
                 self._add("sys", f"\n_Monkeys: {self.look_name()}. Try /anim calm small, /anim tiny, /anim off "
-                                 "(styles: playful, calm, off · sizes: big, small, tiny). F2 steps through all nine._\n")
+                                 "(styles: playful, calm, off · sizes: big, small, tiny). F2 opens the animation menu._\n")
             else:
                 self.set_look(style, size)
-        elif cmd == "status":
-            self._add("sys", f"\nRouting {ROUTES[e.route]} · effort {e.effort} · mode {MODES[e.mode][0]} · "
-                             f"checks {CHECKS[e.checks]}\nNotes: {e.notes}\n")
+        elif cmd in ("status", "settings"):
+            self._add("sys", self.settings_text())
+        elif cmd == "permissions" and arg.split()[:1] == ["installs"]:
+            want = (arg.split() + [""])[1].lower()
+            if want not in ("project", "ask"):
+                self._add("sys", "\n_Choose one: /permissions installs project (installs into the project just happen) "
+                                 "or /permissions installs ask (every install asks you)._\n")
+            else:
+                from .admin import set_project_permission
+                where = set_project_permission(e.project_root, "installs", want)
+                e._rules = None
+                self._add("sys", f"\n_Installs: {'into the project go ahead; onto the whole computer still ask' if want == 'project' else 'every install asks you'}. "
+                                 f"Saved for this project in {where}._\n")
         elif cmd == "usage":
             await self._usage(arg)
         elif cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "models"):
@@ -1287,6 +1296,64 @@ class TUI:
             buf.text = buf.text[:len(buf.text) + comp.start_position] + comp.text
             buf.cursor_position = len(buf.text)
             buf.complete_state = None
+
+    def animation_menu(self):
+        """F2: one menu for everything about the monkeys. Picking an option applies it and keeps the menu open."""
+        pr = self.prefs
+        tick = lambda on: "  ✓" if on else ""   # noqa: E731
+        items = [(f"Lively: {st}{tick(pr['style'] == st)}", ("style", st)) for st in STYLES]
+        items += [(f"Size: {sz}{tick(pr['size'] == sz)}", ("size", sz)) for sz in SIZES]
+        items += [(f"Where: {LAYOUT_NAMES[l]}{tick(pr['layout'] == l)}", ("layout", l)) for l in LAYOUTS]
+        items += [(f"Colours: {c}{tick(pr['palette'] == c)}", ("palette", c)) for c in PALETTES]
+        items += [("Done", ("done", None))]
+        keep = self.picker["i"] if self.picker and self.picker.get("title", "").startswith("Animation") else 0
+
+        def pick(v):
+            what, val = v
+            if what == "done":
+                return
+            if what in ("style", "size"):
+                self.set_look(val if what == "style" else None, val if what == "size" else None)
+            else:
+                self.prefs[what] = val
+                self._save_prefs()
+            self.animation_menu()             # stay open, with the tick moved
+            self.picker["i"] = items.index(next(x for x in items if x[1] == v))
+        self.open_picker("Animation (↑ ↓, Enter to change, Esc to close)", items, pick)
+        self.picker["i"] = keep
+
+    def settings_text(self):
+        """Everything set for this project, and the command that changes each one."""
+        from . import permissions as perms_mod
+        e = self.eng
+        try:
+            from .engine import load_rules
+            r = load_rules(e.rules_path, e.project_root, e.models_file)
+        except Exception as ex:
+            return f"\n_Couldn't read the rules: {ex}_\n"
+        lead, rv, p = r.get("lead", {}), r.get("reviewers", {}), r.get("permissions", {})
+        g, rev = p.get("gatekeeper", {}), r.get("review", {})
+        inst = perms_mod.installs_setting(p)
+        own = pathlib.Path(e.project_root) / ".claudex" / "rules.toml"
+        rows = [
+            ("Who works", ROUTES[e.route], "/auto · /claude · /codex"),
+            ("Reasoning", e.effort, "/effort low · medium · high · xhigh · auto"),
+            ("Permissions", MODES[e.mode][0], "/mode ask · auto · unrestricted"),
+            ("Installs", "into the project: go ahead · whole computer: ask" if inst == "project" else "every install asks you",
+             "/permissions installs project · ask"),
+            ("Checks", CHECKS[e.checks], "/checks full · reviews · off"),
+            ("Lighter check for writing-only changes", "on" if rev.get("light_for_docs", True) else "off", "rules: [review] light_for_docs"),
+            ("Lead", f"{lead.get('agent', 'claude').title()} {lead.get('model')} {lead.get('effort')}", "/models"),
+            ("Reviewers", " · ".join(f"{a.title()} {v.get('model')} {v.get('effort')}" for a, v in rv.items()), "/models"),
+            ("Gatekeeper", f"{g.get('agent', 'claude').title()} {g.get('model', 'none')} {g.get('effort', '')}", "/models"),
+            ("Models file", r.get("_models_file") or "none (the built-in table)", "/models"),
+            ("Project rules", str(own) if own.is_file() else "none", "/permissions"),
+            ("Animation", f"{self.look_name()} · {LAYOUT_NAMES[self.prefs['layout']]} · {self.prefs['palette']}", "F2"),
+            ("Notes", str(e.notes), ""),
+        ]
+        out = "\n### Settings for " + pathlib.Path(e.project_root).name + "\n\n| Setting | Now | Change it with |\n|---|---|---|\n"
+        out += "".join(f"| {a} | {b.replace('|', '/')} | {c} |\n" for a, b, c in rows)
+        return out
 
     def open_picker(self, title, items, on_pick):
         self.picker = {"title": title, "items": items, "i": 0, "on_pick": on_pick}

@@ -17,7 +17,8 @@ COMMANDS = [
     ("checks", "full|reviews|off", "second opinions + reviews / reviews only / none"),
     ("retry", "", "send your last request again (after a stop, or a fix)"),
     ("dry", "", "plan only: show who'd do what, change nothing (toggle)"),
-    ("anim", "playful|calm|off big|small|tiny", "how lively and how big the monkeys are (F2 steps through all nine)"),
+    ("anim", "playful|calm|off big|small|tiny", "the monkeys: F2 opens the animation menu"),
+    ("settings", "", "everything set for this project, in one place, and how to change it"),
     ("status", "", "current settings and where the notes are"),
     ("models", "", "who does what (models.md), and where that comes from"),
     ("rules", "", "the full rules file"),
@@ -30,7 +31,8 @@ COMMANDS = [
     ("usage", "web", "tokens across Claude and Codex as a coloured chart; /usage web opens a live page"),
     ("quit", "", "leave Claudex"),
 ]
-TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry", "resume"}
+TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry", "resume",
+                 "settings"}
 
 
 def _describe(skill_md):

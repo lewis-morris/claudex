@@ -1623,7 +1623,7 @@ def test_picker_tab_and_abbreviations(tmp_path):
     asyncio.run(t.command("/re"))                    # ambiguous: resume, retry…
     assert "Did you mean" in t.blocks[-1]["text"]
     asyncio.run(t.command("/stat"))                  # clear: /status
-    assert "Routing" in t.blocks[-1]["text"]
+    assert "Settings for" in t.blocks[-1]["text"] and "Installs" in t.blocks[-1]["text"]
 
 
 def test_long_command_question_is_plain_and_short(tmp_path):
@@ -1740,3 +1740,17 @@ def test_read_only_claude_calls_are_not_in_plan_mode():
     assert "plan" not in cmd and cmd[cmd.index("--permission-mode") + 1] == "dontAsk"
     assert cmd[cmd.index("--allowedTools") + 1] == "Read,Grep,Glob"
     assert "--allowedTools" not in headless.claude_cmd("sonnet", "low", {}, "")
+
+
+def test_installs_into_the_project_go_ahead_computer_installs_ask(tmp_path):
+    r, root = engine.load_rules(), str(tmp_path)
+
+    def d(c):
+        k, cmd, paths, _ = perms.describe({"kind": "execute", "title": c, "rawInput": {"command": c}}, root)
+        return perms.rule_decision(r, k, cmd, paths, root)[0]
+    assert d(".venv/bin/pip install numpy flask") == "allow" and d("npm install") == "allow"
+    assert d("pip install requests") == "ask" and d("npm install -g ts") == "ask" and d("brew install jq") == "ask"
+    from claudex.admin import set_project_permission
+    set_project_permission(root, "installs", "ask")
+    r = engine.load_rules(project_root=root)
+    assert d(".venv/bin/pip install numpy") == "ask"

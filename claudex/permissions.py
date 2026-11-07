@@ -157,14 +157,31 @@ def matches(pattern, kind, command, paths, project_root):
     return any(fnmatch.fnmatch(t.lower(), glob.lower()) for t in targets)
 
 
+def effective(perms):
+    """deny / ask / allow with the install setting folded in: installs onto the whole computer always ask;
+    installs into the project's own environment are allowed ("project") or ask ("ask")."""
+    installs = installs_setting(perms)
+    project = list(perms.get("project_installs", []))
+    return {"deny": list(perms.get("deny", [])),
+            "ask": list(perms.get("ask", [])) + list(perms.get("computer_installs", []))
+                   + (project if installs == "ask" else []),
+            "allow": list(perms.get("allow", [])) + (project if installs == "project" else [])}
+
+
+def installs_setting(perms):
+    v = str(perms.get("installs", "ask")).lower()
+    return v if v in ("project", "ask") else "ask"
+
+
 def rule_decision(rules, kind, command, paths, project_root, extra_protected=()):
     """("deny"|"ask"|"allow", pattern) for the first matching rule, deny first; (None, None) if none match."""
     perms = rules.get("permissions", {})
     if kind in ("edit", "delete", "move", "run") and protected(paths, command, project_root, extra_protected):
         return "deny", "(built in) Claudex's own rules and memory"
     unvouchable = kind == "run" and (any(op in command for op in COMPOUND) or _risky(command))
+    lists = effective(perms)
     for decision in ("deny", "ask", "allow"):
-        for pattern in perms.get(decision, []):
+        for pattern in lists[decision]:
             if decision == "allow" and unvouchable:
                 continue          # chained or risky flags: an allow rule can't vouch for it; the gatekeeper looks
             if matches(pattern, kind, command, paths, project_root):
@@ -193,8 +210,8 @@ def gate_prompt(kind, command, paths, title, job, rules_text, project_root):
         "irreversible, outside the project, touching secrets or credentials, or sending data off the machine "
         "without an obvious need. A script or command that only reads or changes files inside the project "
         "(python, sed or a heredoc editing project files, formatters, generators) is ordinary editing: allow it. "
-        "Say 'ask' when it's plausible but the user should decide (deploys, pushes, "
-        "installs, paid or external services, deleting user data). Be brief.\n\n"
+        "Say 'ask' when it's plausible but the user should decide (deploys, pushes, paid or external services, "
+        "deleting user data, and installs, as the user's 'installs' rule below says). Be brief.\n\n"
         f"PROJECT: {project_root}\nTHE JOB: {job[:1500]}\n\nTHE ACTION: {kind}\nTITLE: {title}\n"
         f"COMMAND: {command or '(none)'}\nPATHS: {', '.join(paths) or '(none)'}\n\n"
         f"THE USER'S STANDING RULES (already checked; none matched this exactly):\n{rules_text}\n")
@@ -225,7 +242,11 @@ def recent(path, n=50):
 
 def summary_lines(rules):
     p = rules.get("permissions", {})
-    return [f"{k}: " + ", ".join(p.get(k, [])) for k in ("deny", "ask", "allow")]
+    e = effective(p)
+    return [f"{k}: " + ", ".join(e[k]) for k in ("deny", "ask", "allow")] + [
+        "installs: " + ("installing packages into the project's own environment (.venv, node_modules) is fine; "
+                        "installs onto the whole computer need the user"
+                        if installs_setting(p) == "project" else "every package install needs the user")]
 
 
 class Clock:

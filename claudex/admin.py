@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -37,6 +38,28 @@ PROJECT_RULES_TEMPLATE = """# This project's own Claudex rules, layered over you
 # [defaults]
 # agent = "claude"
 """
+
+
+def set_project_permission(root, key, value):
+    """Write one [permissions] setting (e.g. installs = "project") into the project's .claudex/rules.toml."""
+    target = pathlib.Path(root) / ".claudex" / "rules.toml"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    text = target.read_text() if target.exists() else PROJECT_RULES_TEMPLATE
+    line = f'{key} = "{value}"'
+    sec = re.search(r"(?m)^\[permissions\][ \t]*$", text)
+    if sec:
+        end = re.search(r"(?m)^\[", text[sec.end():])
+        body_end = sec.end() + (end.start() if end else len(text) - sec.end())
+        body = text[sec.end():body_end]
+        if re.search(rf"(?m)^{key}\s*=", body):
+            body = re.sub(rf"(?m)^{key}\s*=.*$", line, body)
+        else:
+            body = "\n" + line + body
+        text = text[:sec.end()] + body + text[body_end:]
+    else:
+        text = text.rstrip("\n") + f"\n\n[permissions]\n{line}\n"
+    target.write_text(text)
+    return target
 
 
 def _root(cwd):
@@ -285,8 +308,12 @@ def show_permissions(cwd=".", n=30, edit=False):
           f"{G}allow{RESET} rules,\n  then the gatekeeper ({p.get('gatekeeper', {}).get('model', 'none')}). Chained commands "
           "never match an allow rule. With nobody watching, 'ask you' becomes 'no'.\n")
     width = max(60, __import__("shutil").get_terminal_size((100, 20)).columns - 4)
+    print(f"  {B}installs{RESET}: " + ("into the project's own environment (.venv, node_modules) go ahead; "
+                                       "onto the whole computer ask you" if perms.installs_setting(p) == "project"
+                                       else "every install asks you") + "  (/permissions installs project|ask)\n")
+    eff = perms.effective(p)
     for k, colour in (("deny", R), ("ask", Y), ("allow", G)):
-        items = p.get(k, [])
+        items = eff[k]
         line, shown = "", 0
         for it in items:                 # as many as fit on one line
             if len(line) + len(it) + 14 > width:
