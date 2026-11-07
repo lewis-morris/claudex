@@ -1575,3 +1575,18 @@ def test_resume_an_earlier_conversation(job, tmp_path):
     T, t, e = _tui(repo)
     t.resume("1")
     assert e.session_key == "older" and any("quote maths" in b["text"] for b in t.blocks)
+
+
+def test_ctrl_c_twice_quits(tmp_path):
+    T, t, e = _tui(tmp_path)
+    app = t.build()
+    handler = next(b.handler for b in app.key_bindings.bindings if [k.value if hasattr(k, "value") else k for k in b.keys] == ["c-c"])
+    exited = []
+    ev = type("E", (), {"app": type("A", (), {"exit": lambda self: exited.append(True)})()})()
+    t.input.text = "half typed"
+    handler(ev)
+    assert t.input.text == "" and not exited                 # first: clears what you typed
+    handler(ev)
+    assert not exited and "again to quit" in "".join(x for _, x in t.status())
+    handler(ev)
+    assert exited                                            # pressed again within two seconds: quit

@@ -106,7 +106,7 @@ to just one of them.
 | **F3** | layout: monkeys on top / at the side / just the chat |
 | **F4** | colours: Jungle, Sunset, Daylight |
 | **PgUp / PgDn** | scroll |
-| **Ctrl-C** | stop the current job (the chat stays open) |
+| **Ctrl-C** | clear what you typed, or stop the current job; press it twice to quit |
 | **Ctrl-D** or `/quit` | leave |
 
 ## Permissions: ask, auto, or unrestricted

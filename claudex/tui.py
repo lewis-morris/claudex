@@ -355,6 +355,7 @@ class TUI:
         self.live = {"who": None, "since": time.time(), "actions": 0, "now": ""}   # the live status line
         self.cmd_task = None        # a running /doctor, /rules or /log
         self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
+        self.quit_armed = 0.0       # when Ctrl-C last asked "again to quit?"
         self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
         self.version = 0
         self.skills = load_skills()
@@ -860,6 +861,8 @@ class TUI:
 
     def status(self):
         e = self.eng
+        if time.time() - self.quit_armed < 2:
+            return [("class:danger", " Press Ctrl-C again to quit (Ctrl-D also quits) ")]
         if self.questions:
             _, opts, title = self.questions[0]
             keys = "/".join(k.upper() for k in self._keys(opts).values())
@@ -915,15 +918,26 @@ class TUI:
 
         @kb.add("c-c")
         def _(event):
-            if self.busy and not self.busy.done():
-                self._add("sys", "\n_Stopping…_\n")
+            # Like Claude Code: Ctrl-C clears what you typed or stops the job; with nothing to clear or stop,
+            # it asks once, and a second Ctrl-C within two seconds quits.
+            now = time.time()
+            if now - self.quit_armed < 2:
+                event.app.exit()
+                return
+            if self.input.text:
+                self.input.text = ""
+            elif self.busy and not self.busy.done():
+                self._add("sys", "\n_Stopping… (press Ctrl-C again to quit)_\n")
                 self.stopping = True
                 self.drop_questions()
                 self.eng.cancel()
+                self.quit_armed = now
             elif self.cmd_task and not self.cmd_task.done():
                 self.cmd_task.cancel()
+                self.quit_armed = now
             else:
-                self.input.text = ""
+                self.quit_armed = now
+            self._refresh()
 
         waiting = Condition(lambda: bool(self.questions) and not self.input.text)
         for key in ("y", "n", "a", "r", "Y", "N", "A", "R"):

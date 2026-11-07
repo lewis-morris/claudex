@@ -90,7 +90,7 @@ In the full screen:
 | **F3** | layout: monkeys on top / at the side / just the chat |
 | **F4** | colours: Jungle, Sunset, Daylight |
 | **Y / A / N** | answer a permission question: yes / yes and don't ask again / no (a yellow "Your answer needed" box shows it) |
-| **Ctrl-C** | stop the current job (the chat stays open) |
+| **Ctrl-C** | clear what you typed, or stop the current job; press it twice to quit |
 | **PgUp / PgDn** | scroll |
 | **Ctrl-D** / `/quit` | leave |
 
