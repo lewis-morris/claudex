@@ -915,6 +915,9 @@ def test_limit_phrases_real_notices_vs_ordinary_prose():
     assert limits.reply_is_limit("Claude AI usage limit reached|1762300000")
     assert not limits.reply_is_limit("HTTP 429 means Too Many Requests; retry with exponential backoff.")
     assert not limits.reply_is_limit("Added a rate limiter that returns 429 when the limit is reached.")
+    assert not limits.reply_is_limit("The error message is `usage_limit_reached`; handle it by retrying later.")
+    assert not limits.reply_is_limit("When users see \"You've hit your usage limit\" we show a banner.")
+    assert limits.reply_is_limit("Partly done.\n⚠ Error: usage limit reached. Try again in 3 hours.")
     assert limits.reset_hint("You've hit your limit · resets 3pm") == "3pm"
     assert limits.reset_hint("Rate limit reached. Try again in 2 hours.") == "2 hours"
     assert limits.error_is_limit("429 Too Many Requests") and not limits.error_is_limit("file not found")

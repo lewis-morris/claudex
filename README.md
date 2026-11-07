@@ -30,7 +30,7 @@ need both, and the best results come when someone *else* checks the work. Claude
 - **Big decisions get a second opinion** from the other side *before* any work starts: database schemas,
   money logic, new dependencies, contracts between parts. The lead answers every concern in writing.
 - **Workers take turns**: one part at a time, each in its own real Claude Code or Codex session.
-- **Every change is reviewed by the other agent.** Problems go back to the same worker; if they keep failing,
+- **Every change is reviewed by the other agent** (with reviews on, the default). Problems go back to the same worker; if they keep failing,
   it steps up to a stronger model; then it stops and tells you what's still wrong. (If the other agent is at
   its usage limit, the same side checks instead, and Claudex says so in bold.)
 - **One shared memory.** Everyone (lead, workers, reviewers) sees the same project map, past decisions,
@@ -78,7 +78,8 @@ claudex doctor     # checks logins, connectors and every model in the rules
 ```
 
 Or run it straight from a checkout: `git clone https://github.com/lewis-morris/claudex && claudex/bin/claudex`
-(that needs Python 3.11+ with `prompt_toolkit`; it tells you how to get it if it's missing).
+(that needs a Python 3.11+ that has `prompt_toolkit`: your system one, or point `CLAUDEX_PYTHON` at a virtualenv's
+Python; it tells you how if it's missing).
 
 ## Use
 
@@ -174,7 +175,7 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 
 | File | What |
 |---|---|
-| `project/map.md` | how the project is laid out, refreshed after each job that changed files |
+| `project/map.md` | how the project is laid out, refreshed after each completed job that changed files |
 | `project/decisions.md` | big decisions, second opinions, and the lead's answer to each concern |
 | `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
 | `sessions/<id>/notes.md` | this session's requests, handovers and reviews (long handovers saved whole) |

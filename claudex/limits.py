@@ -35,8 +35,18 @@ def error_is_limit(text):
     return bool(ERROR_RE.search(text or ""))
 
 
+X
+
+
 def reply_is_limit(text):
-    return bool(NOTICE_RE.search((text or "")[-NOTICE_WINDOW:]))
+    """True only for a stand-alone notice: one of the last few lines *starts* with a provider's limit message
+    (after any symbols like ⚠ ✗ ⎿ or "Error:"). A sentence that merely quotes one doesn't count."""
+    lines = [l.strip() for l in (text or "")[-NOTICE_WINDOW:].splitlines() if l.strip()][-3:]
+    for line in lines:
+        rest = line[_LEAD_IN.match(line).end():]
+        if "`" not in line and NOTICE_RE.match(rest):
+            return True
+    return False
 
 
 def reset_hint(text):

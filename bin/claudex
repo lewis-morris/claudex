@@ -1,13 +1,16 @@
 #!/bin/sh
 # Run Claudex straight from a checkout (no install): `bin/claudex`, or link this file onto your PATH.
-# It needs Python 3.11+ with prompt_toolkit. Set CLAUDEX_PYTHON to pick a different Python.
-SELF=$(readlink -f "$0" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")
+# It needs a Python 3.11+ that has prompt_toolkit. Set CLAUDEX_PYTHON to pick one (e.g. a virtualenv's python).
+# Python runs isolated (-I): nothing in the folder you're in can be picked up as code.
+SELF=$(readlink -f "$0" 2>/dev/null || python3 -I -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$0")
 ROOT=$(cd "$(dirname "$SELF")/.." && pwd)
 PY=${CLAUDEX_PYTHON:-python3}
-if ! "$PY" -c 'import sys, prompt_toolkit; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
-    echo "Claudex needs Python 3.11+ with prompt_toolkit. Either install it properly:" >&2
+if ! "$PY" -I -c 'import sys, prompt_toolkit; sys.exit(sys.version_info < (3, 11))' 2>/dev/null; then
+    echo "Claudex needs a Python 3.11+ that has prompt_toolkit. Easiest is to install it:" >&2
     echo "    uv tool install $ROOT        (or: pipx install $ROOT)" >&2
-    echo "or give this Python what it needs:  $PY -m pip install --user prompt_toolkit" >&2
+    echo "or make a virtualenv for it:" >&2
+    echo "    python3 -m venv ~/.venvs/claudex && ~/.venvs/claudex/bin/pip install prompt_toolkit" >&2
+    echo "    export CLAUDEX_PYTHON=~/.venvs/claudex/bin/python" >&2
     exit 1
 fi
-exec "$PY" -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$ROOT" "$@"
+exec "$PY" -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); sys.argv[0] = "claudex"; from claudex.__main__ import main; main()' "$ROOT" "$@"
