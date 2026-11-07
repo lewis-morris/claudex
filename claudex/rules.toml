@@ -129,6 +129,7 @@ ask = [
     "run:pip install*", "run:pip3 install*", "run:npm install*", "run:npm i *", "run:pnpm add*", "run:yarn add*",
     "run:uv add*", "run:uv pip install*", "run:cargo install*", "run:brew install*", "run:apt*", "run:dnf*",
     "run:ssh *", "run:scp *", "run:rsync *", "run:rm -r*", "run:rm -f*", "run:docker *", "run:kubectl *",
+    "run:git branch -d*", "run:git branch -D*", "run:find *",
     "run:psql *", "run:mysql *", "run:redis-cli *", "run:stripe *", "run:aws *", "run:gcloud *", "run:az *",
     "run:shopify theme push*", "run:shopify app deploy*", "fetch:*",
 ]
@@ -139,7 +140,8 @@ allow = [
     "run:pnpm test*", "run:pnpm run *", "run:yarn test*", "run:npx tsc*", "run:tsc*", "run:npx eslint*",
     "run:go test*", "run:go build*", "run:go vet*", "run:cargo test*", "run:cargo build*", "run:cargo check*",
     "run:make test*", "run:make check*", "run:ruff *", "run:black --check*", "run:mypy *", "run:eslint *",
-    "run:git status*", "run:git diff*", "run:git log*", "run:git show*", "run:git branch*", "run:git add *",
-    "run:ls*", "run:cat *", "run:head *", "run:tail *", "run:wc *", "run:grep *", "run:rg *", "run:find *",
+    "run:git status*", "run:git diff*", "run:git log*", "run:git show*", "run:git branch", "run:git branch -a",
+    "run:git branch -v*", "run:git branch --list*", "run:git add *",
+    "run:ls*", "run:cat *", "run:head *", "run:tail *", "run:wc *", "run:grep *", "run:rg *",
     "run:pwd", "run:echo *", "run:which *", "run:python3 --version", "run:node --version",
 ]

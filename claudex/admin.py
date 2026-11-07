@@ -56,6 +56,11 @@ def _ask_yes(question, yes):
 def house_rules_plan(root):
     """What `init` would do with CLAUDE.md and AGENTS.md: [(file, action, new text or None)]."""
     claude, agents = root / "CLAUDE.md", root / "AGENTS.md"
+    if claude.is_symlink() or agents.is_symlink():
+        # already linked by hand: if they end up as the same file, that's shared; otherwise leave them alone
+        if claude.exists() and agents.exists() and claude.resolve() == agents.resolve():
+            return []
+        return [(claude, "leave alone: CLAUDE.md or AGENTS.md is a link, so Claudex won't rewrite it", None)]
     c = claude.read_text(errors="replace") if claude.is_file() else None
     a = agents.read_text(errors="replace") if agents.is_file() else None
     if c is not None and IMPORT_LINE in c and a is not None:
@@ -75,6 +80,22 @@ def house_rules_plan(root):
     return plan
 
 
+def _backup(f):
+    """Keep the old file next to it, never overwriting an earlier backup."""
+    n, dest = 0, f.with_name(f.name + ".bak")
+    while dest.exists():
+        n += 1
+        dest = f.with_name(f"{f.name}.bak{n}")
+    dest.write_text(f.read_text())
+    return dest
+
+
+def _write_atomic(f, text):
+    tmp = f.with_name(f".{f.name}.claudex-tmp")
+    tmp.write_text(text)
+    os.replace(tmp, f)
+
+
 def init(cwd=".", yes=False, no_map=False):
     root = _root(cwd)
     print(f"{B}Setting up Claudex in {root}{RESET}\n")
@@ -83,11 +104,13 @@ def init(cwd=".", yes=False, no_map=False):
         print("House rules (one file both agents follow):")
         for f, action, _ in plan:
             print(f"  {f.name}: {action}")
-        if _ask_yes("Make these changes?", yes):
+        if any(text is None for _, _, text in plan):
+            print("  (nothing changed)")
+        elif _ask_yes("Make these changes?", yes):
             for f, action, text in plan:
-                if f.name == "CLAUDE.md" and f.exists():
-                    f.with_name("CLAUDE.md.bak").write_text(f.read_text())
-                f.write_text(text)
+                if f.exists():
+                    _backup(f)
+                _write_atomic(f, text)
             print(f"  {G}done{RESET} (not committed: commit them when you're happy)")
     else:
         print(f"House rules: {G}already shared{RESET} (CLAUDE.md points at AGENTS.md)")
@@ -267,4 +290,43 @@ def show_usage(days=14, project=None, web=False, lan=False, port=8765, as_json=F
         return 0
     s = usage.summary(days, project)
     print(json.dumps(s, indent=1) if as_json else usage.terminal(s, colour=TTY))
+    return 0
+
+
+# ---------- models ----------
+def show_models(cwd=".", init_file=False, edit=False, global_=False, models_file=None):
+    from . import models
+    root = _root(cwd)
+    target = models.USER_MODELS if global_ else root / ".claudex" / "models.md"
+    if init_file or edit:
+        if not target.exists():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(models.render(load_rules(project_root=None if global_ else root)))
+            print(f"Made {target} from the rules in force: edit it to change who does what"
+                  + ("" if global_ else " in this project") + ".")
+        if edit:
+            return subprocess.call([os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano", str(target)])
+        return 0
+    rules = load_rules(project_root=root, models_file=models_file)
+    src = rules.get("_models_file") or f"{rules_file()} (no models.md yet)"
+    print(f"{B}Who does what{RESET}  ({root.name})   from: {src}\n")
+    lead, d = rules["lead"], rules["defaults"]
+    print(f"  {B}Lead{RESET}        {lead.get('agent', 'claude')} {lead['model']} {lead['effort']}")
+    print(f"  {B}Default{RESET}     {d['agent']} {d['model']} {d['effort']}")
+    for a, v in rules.get("reviewers", {}).items():
+        print(f"  {B}Checker{RESET}     {a} {v['model']} {v['effort']}   (checks the other side's work)")
+    g = rules.get("permissions", {}).get("gatekeeper", {})
+    if g:
+        print(f"  {B}Gatekeeper{RESET}  {g.get('agent', 'claude')} {g.get('model')} {g.get('effort')}")
+    print()
+    colour = {"claude": "\033[38;2;255;143;107m", "codex": "\033[38;2;95;208;224m"} if TTY else {"claude": "", "codex": ""}
+    for r in rules.get("rule", []):
+        u = r["use"]
+        tag = " + browser" if u.get("browser") else ""
+        print(f"  {colour[u['agent']]}{u['agent']:<6} {u['model']:<12} {u['effort']:<7}{RESET}{tag}  {r['when']}")
+    if rules.get("_lead_notes"):
+        print(f"\n{B}Your notes for the lead{RESET}\n" + "\n".join("  " + l for l in rules["_lead_notes"].splitlines()))
+    where = "this project" if not global_ else "everywhere"
+    print(f"\n{D}Change it: `claudex models --edit` (this project) or `claudex models --edit --global` (everywhere). "
+          f"One session only: `claudex --models FILE`.{RESET}")
     return 0

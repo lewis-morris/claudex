@@ -127,7 +127,7 @@ class Server:
                 e.busy = False
         raise RpcError(-32601, f"method not found: {method}")
 
-    LOCAL = ("rules", "doctor", "log", "memory", "status", "help", "shared", "permissions", "init", "usage")
+    LOCAL = ("rules", "doctor", "log", "memory", "status", "help", "shared", "permissions", "init", "usage", "models")
 
     def local_command(self, text):
         parts = text[1:].split(None, 1)
@@ -144,9 +144,9 @@ class Server:
                 self._web = threading.Thread(target=usage.serve, kwargs={"open_browser": False}, daemon=True)
                 self._web.start()
             return "Usage page: http://localhost:8765/ (live; `claudex usage --web --lan` to see it from your phone)\n"
-        if cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "usage"):
+        if cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "usage", "models"):
             extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
-                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"]}.get(cmd, [])
+                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"], "models": ["--cwd", e.cwd]}.get(cmd, [])
             args, env = self_command(cmd, *extra, rules=e.rules_path)
             p = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                      stderr=asyncio.subprocess.STDOUT, env=env,

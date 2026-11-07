@@ -316,6 +316,12 @@ def main(argv):
     us.add_argument("--port", type=int, default=8765)
     us.add_argument("--no-open", action="store_true", help="with --web: don't open the browser")
     us.add_argument("--json", action="store_true", help="raw numbers")
+    mo = sub.add_parser("models", help="who does what, and where it comes from (models.md)")
+    mo.add_argument("--init", action="store_true", help="make an editable models.md from the rules in force")
+    mo.add_argument("--edit", action="store_true", help="open models.md (made first if needed)")
+    mo.add_argument("--global", dest="global_", action="store_true", help="your models.md for every project")
+    mo.add_argument("--models", metavar="FILE", help="show what this models.md would do")
+    mo.add_argument("--cwd", default=".")
     be = sub.add_parser("bench", help="race Claude, Codex and Claudex on small projects")
     be.add_argument("--tasks", help="comma-separated (default: all)")
     be.add_argument("--arms", default="claude,codex,claudex", help="who races (default: all three)")
@@ -345,6 +351,8 @@ def main(argv):
         arms = tuple(x.strip() for x in a.arms.split(",") if x.strip() in bench.ARMS)
         return bench.main(a.tasks.split(",") if a.tasks else None, arms, a.runs, not a.no_judge, a.timeout)
     from . import admin
+    if a.cmd == "models":
+        return admin.show_models(a.cwd, a.init, a.edit, a.global_, a.models)
     if a.cmd == "init":
         return admin.init(a.cwd, a.yes, a.no_map)
     if a.cmd == "shared":

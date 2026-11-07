@@ -1,4 +1,5 @@
 title = "Quote total with VAT, and a quote page"
+expected_tests = 13
 check = "python3 -m pytest -q --tb=line"
 brief = """
 This small Python project has calc.py with subtotal(lines), where lines is a list of (qty, unit_price_pence).

@@ -108,7 +108,7 @@ def _codex_file(path):
 
 
 def _files(cutoff):
-    files = [(p, _claude_file) for p in glob.glob(str(CLAUDE_LOGS / "*/*.jsonl"))]
+    files = [(p, _claude_file) for p in glob.glob(str(CLAUDE_LOGS / "**/*.jsonl"), recursive=True)]  # incl. subagents
     files += [(p, _codex_file) for p in glob.glob(str(CODEX_LOGS / "**/rollout-*.jsonl"), recursive=True)]
     for path, parse in files:
         try:
@@ -186,7 +186,7 @@ def summary(days=14, project=None):
     by_project = collections.defaultdict(lambda: {"claude": 0, "codex": 0})
     by_model = collections.Counter()
     by_role = collections.defaultdict(lambda: {"claude": 0, "codex": 0})
-    totals = {"claude": {"fresh": 0, "cached": 0, "output": 0}, "codex": {"fresh": 0, "cached": 0, "output": 0}}
+    totals = {a: {"fresh": 0, "cached": 0, "output": 0, "work": 0} for a in ("claude", "codex")}
     for e in events:
         agent = e.get("agent")
         if agent not in totals:
@@ -203,6 +203,7 @@ def summary(days=14, project=None):
             by_role[e.get("role") or "?"][agent] += work
         for k in ("fresh", "cached", "output"):
             totals[agent][k] += int(e.get(k) or 0)
+        totals[agent]["work"] += work          # the headline number: same measure as the chart
     top = sorted(by_project.items(), key=lambda kv: -(kv[1]["claude"] + kv[1]["codex"]))[:10]
     return {"days": days, "generated": now.isoformat(timespec="seconds"), "project": project,
             "by_day": [{"day": d, **by_day[d]} for d in day_keys], "by_project": [{"project": k, **v} for k, v in top],
@@ -245,9 +246,9 @@ def terminal(s, colour=True, width=50):
         lines.append(f"{d['day'][5:]} {paint(mark_c, COLOURS['claude'])}{paint(mark_x, COLOURS['codex'])} "
                      + dim(human(d["claude"] + d["codex"])))
     t = s["totals"]
-    lines += ["", f"Claude  {human(t['claude']['fresh'] + t['claude']['output'])} tokens "
+    lines += ["", f"Claude  {human(t['claude']['work'])} tokens "
                   f"({human(t['claude']['output'])} written, {human(t['claude']['cached'])} cached reads)",
-              f"Codex   {human(t['codex']['fresh'] + t['codex']['output'])} tokens "
+              f"Codex   {human(t['codex']['work'])} tokens "
               f"({human(t['codex']['output'])} written, {human(t['codex']['cached'])} cached reads)"]
     if s["by_project"]:
         lines += ["", "Top projects:"]
@@ -289,12 +290,13 @@ svg text{fill:var(--dim);font-size:11px}
 <p class="dim" id="note"></p></main>
 <script>
 const fmt=n=>n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'k':String(n);
+const esc=x=>String(x).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const css=v=>getComputedStyle(document.documentElement).getPropertyValue(v);
 async function load(){
  const days=document.getElementById('days').value;
  const s=await (await fetch('api/usage?days='+days)).json();
  document.getElementById('when').textContent='updated '+new Date(s.generated).toLocaleTimeString();
- const t=s.totals, sum=a=>t[a].fresh+t[a].output;
+ const t=s.totals, sum=a=>t[a].work;
  document.getElementById('tot').innerHTML=['claude','codex'].map(a=>`<div class="card"><div class="dim">${a[0].toUpperCase()+a.slice(1)}</div>
   <div class="big" style="color:var(--${a})">${fmt(sum(a))}</div><div class="dim">${fmt(t[a].output)} written · ${fmt(t[a].cached)} cached reads</div></div>`).join('');
  const svg=document.getElementById('chart'),W=svg.clientWidth||900,H=260,pad=28,n=s.by_day.length;
@@ -306,9 +308,9 @@ async function load(){
   if(d.claude+d.codex)h+=`<text x="${x+w/2}" y="${base-hc-hx-4}" text-anchor="middle">${fmt(d.claude+d.codex)}</text>`;});
  svg.innerHTML=h;
  const rows=(id,items,cols)=>document.getElementById(id).innerHTML=items.length?items.map(cols).join(''):'<tr><td class="dim">nothing yet</td></tr>';
- rows('proj',s.by_project,p=>`<tr><td>${p.project}</td><td class="n" style="color:var(--claude)">${fmt(p.claude)}</td><td class="n" style="color:var(--codex)">${fmt(p.codex)}</td></tr>`);
- rows('models',s.by_model,m=>`<tr><td>${m[0]}</td><td class="n">${fmt(m[1])}</td></tr>`);
- rows('roles',s.by_role,r=>`<tr><td>${r.role}</td><td class="n" style="color:var(--claude)">${fmt(r.claude)}</td><td class="n" style="color:var(--codex)">${fmt(r.codex)}</td></tr>`);
+ rows('proj',s.by_project,p=>`<tr><td>${esc(p.project)}</td><td class="n" style="color:var(--claude)">${fmt(p.claude)}</td><td class="n" style="color:var(--codex)">${fmt(p.codex)}</td></tr>`);
+ rows('models',s.by_model,m=>`<tr><td>${esc(m[0])}</td><td class="n">${fmt(m[1])}</td></tr>`);
+ rows('roles',s.by_role,r=>`<tr><td>${esc(r.role)}</td><td class="n" style="color:var(--claude)">${fmt(r.claude)}</td><td class="n" style="color:var(--codex)">${fmt(r.codex)}</td></tr>`);
  document.getElementById('note').textContent=s.note;}
 document.getElementById('days').onchange=load;load();setInterval(load,30000);
 </script></body></html>"""

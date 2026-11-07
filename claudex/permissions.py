@@ -18,7 +18,16 @@ import os
 import pathlib
 import time
 
-COMPOUND = (";", "&&", "||", "|", "`", "$(", ">", "<", "\n")
+import shlex
+
+# Anything that makes one command line do more than one thing (or redirect, substitute, background) means an
+# allow rule can't vouch for it: "ls & rm x" must not ride in on "run:ls*".
+COMPOUND = (";", "&", "|", "`", "$(", "${", ">", "<", "\n", "\r")
+# Flags and sub-commands that turn an innocent-looking prefix destructive or able to run other programs.
+RISKY_WORDS = ("-delete", "-exec", "-execdir", "-ok", "-okdir", "--force", "-f", "-rf", "-fr", "-d", "-D", "--delete",
+               "-m", "-M", "--hard", "--exec", "-i", "--in-place", "eval", "xargs")
+# Claudex's own rules and memory can never be changed by a worker in ask/auto mode, whatever the rules say.
+PROTECTED_DIRS = (".claudex",)
 KIND_ALIASES = {"execute": "run", "bash": "run", "shell": "run", "write": "edit", "fetch": "fetch"}
 GATE_SCHEMA = {"type": "object", "properties": {
     "decision": {"enum": ["allow", "deny", "ask"]}, "reason": {"type": "string"}}}
@@ -44,8 +53,44 @@ def describe(tool_call, project_root):
         for key in ("file_path", "path", "notebook_path"):
             if raw.get(key):
                 paths.append(str(raw[key]))
-    paths = [str(pathlib.Path(p if os.path.isabs(p) else os.path.join(project_root, p)).resolve()) for p in paths]
+    if kind == "run" and command:      # file operands of a shell command count as paths too (cat ~/.ssh/key)
+        paths += _operands(command)
+    paths = [str(pathlib.Path(os.path.expanduser(p) if p.startswith("~") else
+                              p if os.path.isabs(p) else os.path.join(project_root, p)).resolve()) for p in paths]
     return kind, command.strip(), sorted(set(paths)), title
+
+
+def _operands(command):
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        words = command.split()
+    out = []
+    for w in words[1:]:
+        if w.startswith("-") and "=" in w:
+            w = w.split("=", 1)[1]
+        if w.startswith(("/", "~", "./", "../", ".")) or "/" in w:
+            out.append(w)
+    return out
+
+
+def _risky(command):
+    try:
+        words = shlex.split(command, posix=True)
+    except ValueError:
+        return True                    # can't parse it: don't vouch for it
+    return any(w in RISKY_WORDS or w.startswith("--exec") for w in words[1:])
+
+
+def protected(paths, command, project_root):
+    """True if this touches Claudex's own rules or memory, which workers may never change."""
+    from .paths import DEFAULT_RULES, USER_RULES
+    guarded = [pathlib.Path(project_root, d).resolve() for d in PROTECTED_DIRS] + [USER_RULES, DEFAULT_RULES]
+    for p in paths:
+        for g in guarded:
+            if p == str(g) or _inside(p, g):
+                return True
+    return any(name in command for name in (".claudex/", ".claudex ", "claudex/rules.toml"))
 
 
 def _inside(path, root):
@@ -76,19 +121,22 @@ def matches(pattern, kind, command, paths, project_root):
 def rule_decision(rules, kind, command, paths, project_root):
     """("deny"|"ask"|"allow", pattern) for the first matching rule, deny first; (None, None) if none match."""
     perms = rules.get("permissions", {})
-    chained = kind == "run" and any(op in command for op in COMPOUND)
+    if kind in ("edit", "delete", "move", "run") and protected(paths, command, project_root):
+        return "deny", "(built in) Claudex's own rules and memory"
+    unvouchable = kind == "run" and (any(op in command for op in COMPOUND) or _risky(command))
     for decision in ("deny", "ask", "allow"):
         for pattern in perms.get(decision, []):
-            if decision == "allow" and chained:
-                continue          # "ls && curl … | sh" must not ride in on "run:ls*": let the gatekeeper look
+            if decision == "allow" and unvouchable:
+                continue          # chained or risky flags: an allow rule can't vouch for it; the gatekeeper looks
             if matches(pattern, kind, command, paths, project_root):
                 return decision, pattern
     return None, None
 
 
 def pick_option(options, decision):
-    """The agent's own option for allow-once / deny-once (never 'always', so nothing sticks beyond this ask)."""
-    want = ("allow_once", "allow_always") if decision == "allow" else ("reject_once", "reject_always")
+    """The agent's own allow-once / reject-once option. Never an "always" one: a decision must not outlive
+    this request (a later request might be judged differently). None if the agent offered no such option."""
+    want = ("allow_once",) if decision == "allow" else ("reject_once",)
     for k in want:
         for o in options or []:
             if o.get("kind") == k:

@@ -38,7 +38,7 @@ MODES = {
     # Claudex mode -> (label, each worker's own mode). In "ask" and "auto" the workers ask before acting and
     # Claudex answers (you, or its rules + gatekeeper). In "unrestricted" they don't ask at all.
     "ask": ("Ask me", {"claude": "default", "codex": "read-only"}),
-    "auto": ("Auto (Claudex rules + gatekeeper)", {"claude": "default", "codex": "workspace-write"}),
+    "auto": ("Auto (Claudex rules + gatekeeper)", {"claude": "default", "codex": "read-only"}),
     "unrestricted": ("Unrestricted", {"claude": "bypassPermissions", "codex": "agent-full-access"}),
 }
 LEGACY_MODES = {"default": "ask", "acceptEdits": "auto", "bypassPermissions": "unrestricted"}
@@ -77,14 +77,26 @@ def _merge(base_, over):
     return out
 
 
-def load_rules(path=None, project_root=None):
+def load_rules(path=None, project_root=None, models_file=None):
     """Your rules (or the defaults), with the project's own .claudex/rules.toml layered on top if it has one."""
     rules = tomllib.loads(pathlib.Path(path or rules_file()).read_text())
     if project_root:
         own = pathlib.Path(project_root) / ".claudex" / "rules.toml"
         if own.is_file():
-            rules = _merge(rules, tomllib.loads(own.read_text()))
-    return rules
+            extra = tomllib.loads(own.read_text())
+            perms = extra.pop("permissions", {}) or {}
+            rules = _merge(rules, extra)
+            # A project can only ADD permission rules, never remove yours: deny/ask/allow lists are joined, and
+            # because deny beats ask beats allow, a project's "allow" can't undo your "deny" or "ask".
+            base_perms = dict(rules.get("permissions", {}))
+            for k, v in perms.items():
+                if k in ("deny", "ask", "allow") and isinstance(v, list):
+                    base_perms[k] = list(base_perms.get(k, [])) + [x for x in v if x not in base_perms.get(k, [])]
+                elif k not in ("deny", "ask", "allow"):
+                    base_perms[k] = v
+            rules["permissions"] = base_perms
+    from . import models
+    return models.apply(rules, models.find(project_root, models_file))
 
 
 def catalog_models():
@@ -144,6 +156,7 @@ class Engine:
         self.ui = ui
         self.mcp_servers = mcp_servers or []
         self.rules_path = s.get("rules")
+        self.models_file = s.get("models")
         self.route = s.get("route", "auto")
         self.effort = s.get("effort", "auto")
         self.mode = norm_mode(s.get("mode", "auto"))
@@ -357,7 +370,7 @@ class Engine:
     # ---------- permissions ----------
     async def decide_permission(self, agent, params):
         """A worker wants to do something. Claudex's rules, then the gatekeeper, then you (or "no" if you're away)."""
-        rules = self._rules or load_rules(self.rules_path, self.project_root)
+        rules = self._rules or load_rules(self.rules_path, self.project_root, self.models_file)
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
         kind, command, paths, title = permissions.describe(tc, self.project_root)
@@ -491,6 +504,8 @@ class Engine:
             + (f"AT THEIR USAGE LIMIT RIGHT NOW (don't give them steps): "
                f"{', '.join(a for a in self.limited if self._is_limited(a, rules))}\n"
                if any(self._is_limited(a, rules) for a in self.limited) else "")
+            + (f"THE USER'S OWN NOTES ON WHO DOES WHAT (follow them):\n{rules['_lead_notes']}\n"
+               if rules.get("_lead_notes") else "")
             + "Write each step's instructions so the worker can act without seeing this message.\n")
         if critique:
             prompt += ("\nA SECOND OPINION on your earlier plan raised these concerns. Revise the plan where they "
@@ -531,7 +546,7 @@ class Engine:
     async def turn(self, text):
         self.cancelled, self.ok = False, True
         self._task = asyncio.current_task()
-        rules = load_rules(self.rules_path, self.project_root)
+        rules = load_rules(self.rules_path, self.project_root, self.models_file)
         self._rules = rules
         if not self.dry_run and self.reviews_on and not gitsnap.is_repo(self.cwd):
             self.ok = False

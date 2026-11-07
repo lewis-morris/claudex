@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import pathlib
 import sys
 
 USAGE = """claudex [options]            chat in this folder
@@ -7,7 +8,8 @@ claudex -p "message"         run one message, then exit (exit code 1 if it faile
 claudex --acp                run as an agent for Agents of Empires (or any ACP client)
 claudex login [claude|codex] sign in to whichever isn't signed in (--device for a code, --again to redo)
 claudex doctor [--live]      check logins, versions, connectors and every model in the rules
-claudex rules [--edit]       show (or edit) who does what
+claudex models [--init|--edit] [--global]   who does what, and where that comes from (models.md)
+claudex rules [--edit]       show (or edit) the full rules file
 claudex log [-n N]           recent steps in this project
 claudex update               update Claude, Codex and both connectors, then run doctor
 claudex init                 set a project up: one house-rules file for both agents, memory, first map
@@ -43,6 +45,7 @@ def chat_parser():
     ap.add_argument("--lead-model", help="model for the lead (default from rules.toml)")
     ap.add_argument("--lead-effort", choices=["low", "medium", "high", "xhigh"], help="reasoning for the lead")
     ap.add_argument("--rules", help="use a different rules file")
+    ap.add_argument("--models", metavar="FILE", help="use this models.md (who does what) for this session")
     ap.add_argument("--dry-run", action="store_true", help="show the plan and who'd do each part; change nothing")
     ap.add_argument("--plain", action="store_true", help="simple line-by-line chat instead of the full screen")
     return ap
@@ -55,7 +58,7 @@ def settings_from(args):
     if args.no_review:
         checks = "off"
     return {"route": args.route, "mode": args.mode, "effort": args.effort, "checks": checks,
-            "lead_model": args.lead_model, "lead_effort": args.lead_effort, "rules": args.rules,
+            "lead_model": args.lead_model, "lead_effort": args.lead_effort, "rules": args.rules, "models": args.models,
             "dry_run": args.dry_run, "unattended": args.unattended}
 
 
@@ -65,10 +68,12 @@ def main():
         from . import ui_demo
         sys.exit(ui_demo.main())
     if argv and argv[0] in ("doctor", "rules", "log", "update", "login", "init", "shared", "memory",
-                            "permissions", "usage", "bench"):
+                            "permissions", "usage", "bench", "models"):
         from . import tools
         sys.exit(tools.main(argv))
     args, _unknown = chat_parser().parse_known_args(argv)  # AoE may append agent flags; ignore them
+    if args.models and not pathlib.Path(args.models).is_file():
+        sys.exit(f"claudex: --models {args.models}: no such file (make one with `claudex models --init`)")
     settings = settings_from(args)
     try:
         if args.acp:

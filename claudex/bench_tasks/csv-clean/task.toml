@@ -1,4 +1,5 @@
 title = "Clean a messy customer CSV"
+expected_tests = 6
 check = "python3 -m pytest -q --tb=line"
 brief = """
 data/customers.csv is a messy export (columns: name, email, phone, signed_up). Write clean.py with:

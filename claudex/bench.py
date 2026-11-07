@@ -67,22 +67,49 @@ def command(arm, brief, folder):
             "--mode", "auto", "--unattended"]
 
 
+RUNNER = r"""
+import sys, pytest
+project, tests, ini, xml = sys.argv[1:5]
+sys.path.append(project)          # last, so the project can't stand in for pytest or the standard library
+sys.exit(pytest.main([tests, "-c", ini, "--rootdir", tests, "--noconftest", "-p", "no:cacheprovider",
+                      "-q", "--tb=line", "--junitxml", xml]))
+"""
+
+
 def hidden_tests(task, folder):
-    dest = folder / ".bench_hidden"
-    shutil.copytree(task["dir"] / "hidden", dest, dirs_exist_ok=True)
-    cmd = task.get("check", "python3 -m pytest -q --tb=line").split() + ["-p", "no:cacheprovider", "--rootdir", ".",
-                                                                        ".bench_hidden"]
+    """Run the task's hidden tests on the result, from a trusted copy outside the project, ignoring any test
+    settings, conftest or plugins the contender added. Missing tests count as failures."""
+    import xml.etree.ElementTree as ET
+    work = WORK / "hidden" / uuid.uuid4().hex[:10]
+    tests = work / "tests"
+    shutil.copytree(task["dir"] / "hidden", tests)
+    ini = work / "pytest.ini"
+    ini.write_text("[pytest]\naddopts =\n")
+    xml = work / "results.xml"
+    expected = int(task.get("expected_tests", 0))
+    env = {k: v for k, v in tool_env().items() if not k.startswith("PYTEST")}
     try:
-        p = subprocess.run(cmd, cwd=folder, capture_output=True, text=True, timeout=300, env=tool_env())
-        out = p.stdout + p.stderr
+        # -E: ignore PYTHON* settings; -P: don't put the current folder first on the import path
+        p = subprocess.run([sys.executable, "-E", "-P", "-c", RUNNER, str(folder), str(tests), str(ini), str(xml)],
+                           cwd=folder, capture_output=True, text=True, timeout=300, env=env,
+                           start_new_session=True)
+        exit_code = p.returncode
     except subprocess.TimeoutExpired:
-        return {"passed": 0, "failed": 0, "total": 0, "pct": 0.0, "note": "hidden tests timed out"}
-    passed = sum(int(n) for n in re.findall(r"(\d+) passed", out))
-    failed = sum(int(n) for n in re.findall(r"(\d+) (?:failed|error)", out))
-    total = passed + failed
-    if not total:   # nothing collected: usually the module or function it should have made doesn't exist
-        return {"passed": 0, "failed": 1, "total": 1, "pct": 0.0, "note": out.strip().splitlines()[-1:] or ""}
-    return {"passed": passed, "failed": failed, "total": total, "pct": round(100 * passed / total, 1)}
+        return {"passed": 0, "failed": expected, "total": expected, "pct": 0.0, "note": "hidden tests timed out"}
+    passed = failed = 0
+    try:
+        for case in ET.parse(xml).getroot().iter("testcase"):
+            if any(child.tag in ("failure", "error", "skipped") for child in case):
+                failed += 1
+            else:
+                passed += 1
+    except Exception:
+        pass
+    total = max(passed + failed, expected)          # tests that never ran (import failed…) count as failed
+    failed = total - passed
+    note = "" if exit_code in (0, 1) else f"pytest exited {exit_code}"
+    return {"passed": passed, "failed": failed, "total": total,
+            "pct": round(100 * passed / total, 1) if total else 0.0, "note": note}
 
 
 def anonymous_copy(folder):
@@ -124,6 +151,28 @@ def tokens(folder, start_iso, end_iso):
     return out
 
 
+def _stop_group(proc):
+    import signal
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(proc.pid, sig)
+        except ProcessLookupError:
+            break
+        for _ in range(50):
+            try:
+                os.killpg(proc.pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.1)
+        else:
+            continue
+        break
+    try:
+        proc.wait(timeout=10)
+    except Exception:
+        pass
+
+
 def run_one(task_name, task, arm, n, stamp, timeout_min, judge_it):
     folder = WORK / stamp / f"{task_name}-{arm}-{n}"
     prepare(task, folder)
@@ -132,12 +181,15 @@ def run_one(task_name, task, arm, n, stamp, timeout_min, judge_it):
     print(f"  {task_name} · {arm} · run {n}: working…", flush=True)
     start_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
     t0 = time.time()
+    proc = subprocess.Popen(command(arm, task["brief"], folder), cwd=folder, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=tool_env(), stdin=subprocess.DEVNULL,
+                            start_new_session=True)   # its own group: everything it starts can be stopped
     try:
-        p = subprocess.run(command(arm, task["brief"], folder), cwd=folder, capture_output=True, text=True,
-                           timeout=timeout_min * 60, env=tool_env(), stdin=subprocess.DEVNULL)
-        exit_code, out = p.returncode, p.stdout
+        out, _ = proc.communicate(timeout=timeout_min * 60)
+        exit_code = proc.returncode
     except subprocess.TimeoutExpired:
-        exit_code, out = "timeout", ""
+        out, exit_code = "", "timeout"
+    _stop_group(proc)                                  # nothing may keep working (or spending) during scoring
     secs = round(time.time() - t0, 1)
     time.sleep(2)   # let the agents finish writing their logs
     end_iso = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
@@ -230,6 +282,10 @@ blind reviews by Claude Opus and Codex Astra, averaged · tokens from both agent
 
 def main(task_names=None, arms=ARMS, runs=1, judge_it=True, timeout_min=30):
     all_tasks = tasks()
+    if subprocess.run([sys.executable, "-E", "-P", "-c", "import pytest"], capture_output=True).returncode != 0:
+        print(f"The benchmark marks work with pytest, which this Python ({sys.executable}) doesn't have. "
+              f"Install it: {sys.executable} -m pip install --user pytest")
+        return 1
     chosen = [t for t in (task_names or list(all_tasks)) if t in all_tasks]
     if not chosen:
         print("No such task. Available: " + ", ".join(all_tasks))

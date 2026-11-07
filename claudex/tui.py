@@ -886,10 +886,10 @@ class TUI:
                              f"checks {CHECKS[e.checks]}\nNotes: {e.notes}\n")
         elif cmd == "usage":
             await self._usage(arg)
-        elif cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init"):
+        elif cmd in ("rules", "doctor", "log", "shared", "memory", "permissions", "init", "models"):
             self._add("sys", f"\n_Running /{cmd}…_\n")
             extra = {"log": ["--cwd", e.cwd], "shared": ["--cwd", e.cwd], "memory": ["--cwd", e.cwd],
-                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"]}.get(cmd, [])
+                     "permissions": ["--cwd", e.cwd], "init": ["--cwd", e.cwd, "--yes"], "models": ["--cwd", e.cwd]}.get(cmd, [])
             args, env = self_command(cmd, *extra, *(arg.split() if cmd == "memory" else []), rules=e.rules_path)
             proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                         stderr=asyncio.subprocess.STDOUT, env=env,
@@ -929,7 +929,7 @@ class TUI:
                       ("class:dim", f" {usage.human(d['claude'] + d['codex'])}\n")]
         t = s["totals"]
         for a in ("claude", "codex"):
-            frags.append((f"fg:{p[a]}", f"\n{a.title():<7} {usage.human(t[a]['fresh'] + t[a]['output'])} tokens "
+            frags.append((f"fg:{p[a]}", f"\n{a.title():<7} {usage.human(t[a]['work'])} tokens "
                                          f"({usage.human(t[a]['output'])} written, {usage.human(t[a]['cached'])} cached)"))
         for r in s["by_role"]:
             frags.append(("class:dim", f"\n  Claudex {r['role']}: Claude {usage.human(r['claude'])} · Codex {usage.human(r['codex'])}"))

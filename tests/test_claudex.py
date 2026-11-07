@@ -3,6 +3,7 @@ import datetime
 import os
 import json
 import pathlib
+import shutil
 import subprocess
 import sys
 
@@ -408,8 +409,8 @@ def test_stuck_worker_is_shut_down(job, monkeypatch):
     FakeChild.script = [hang]
     real = engine.load_rules
 
-    def short_rules(path=None, project_root=None):
-        r = real(path, project_root)
+    def short_rules(path=None, project_root=None, models_file=None):
+        r = real(path, project_root, models_file)
         r["limits"]["step_timeout_min"] = 0.01
         return r
     monkeypatch.setattr(engine, "load_rules", short_rules)
@@ -1112,7 +1113,8 @@ def test_project_rules_layer_over_yours(tmp_path):
     (tmp_path / ".claudex").mkdir()
     (tmp_path / ".claudex/rules.toml").write_text('[permissions]\nallow = ["run:./manage.py test*"]\n')
     r = engine.load_rules(project_root=tmp_path)
-    assert r["permissions"]["allow"] == ["run:./manage.py test*"] and r["permissions"]["deny"]   # deny kept
+    assert "run:./manage.py test*" in r["permissions"]["allow"] and "read:*" in r["permissions"]["allow"]
+    assert r["permissions"]["deny"]                                                  # yours are kept
 
 
 # ---------- usage ----------
@@ -1140,8 +1142,8 @@ def test_usage_reads_both_agents_logs(tmp_path, monkeypatch):
     monkeypatch.setattr(usage, "INDEX", tmp_path / "index.json")
     usage.record("claude", "sonnet", "gatekeeper", "/w/shop", fresh=5, output=5)
     s = usage.summary(2)
-    assert s["totals"]["claude"] == {"fresh": 105, "cached": 500, "output": 55}
-    assert s["totals"]["codex"] == {"fresh": 600, "cached": 900, "output": 150}
+    assert s["totals"]["claude"] == {"fresh": 105, "cached": 500, "output": 55, "work": 160}
+    assert s["totals"]["codex"] == {"fresh": 600, "cached": 900, "output": 150, "work": 750}
     assert s["by_project"][0]["project"] == "shop" and s["by_role"][0]["role"] == "gatekeeper"
     assert "Claude" in usage.terminal(s, colour=False)
 
@@ -1154,3 +1156,109 @@ def test_init_makes_one_house_rules_file(tmp_path):
     a, c = (tmp_path / "AGENTS.md").read_text(), (tmp_path / "CLAUDE.md").read_text()
     assert "Use pence." in a and "Run pytest." in a and c.startswith("@AGENTS.md")
     assert (tmp_path / "CLAUDE.md.bak").read_text().startswith("# Rules") and admin.house_rules_plan(tmp_path) == []
+
+
+# ---------- models.md ----------
+def test_models_md_overrides_who_does_what(tmp_path):
+    from claudex import models
+    (tmp_path / ".claudex").mkdir()
+    (tmp_path / ".claudex/models.md").write_text("""# Who does what
+<!-- a comment the lead never sees -->
+| When | Agent | Model | Reasoning | Browser |
+|---|---|---|---|---|
+| anything with money | codex | gpt-6-astra | high | |
+| the shop's pages | claude | sonnet | high | yes |
+
+Lead: claude opus xhigh
+Default: claude sonnet medium
+Codex reviewer: gpt-6-astra xhigh
+
+- Database work always goes to Codex.
+""")
+    r = engine.load_rules(project_root=tmp_path)
+    assert [x["use"]["agent"] for x in r["rule"]] == ["codex", "claude"] and r["rule"][1]["use"]["browser"]
+    assert r["lead"]["effort"] == "xhigh" and r["defaults"] == {"agent": "claude", "model": "sonnet", "effort": "medium"}
+    assert r["reviewers"]["codex"]["effort"] == "xhigh" and r["reviewers"]["claude"]["model"] == "opus"
+    assert r["_lead_notes"] == "- Database work always goes to Codex." and "comment" not in r["_lead_notes"]
+    again = models.parse(models.render(engine.load_rules()))     # render → parse round-trips the defaults
+    assert len(again["rows"]) == len(engine.load_rules()["rule"]) and not again["notes"]
+
+
+def test_lead_reads_the_notes(job):
+    repo, calls, answers = job
+    (repo / ".claudex").mkdir(exist_ok=True)
+    (repo / ".claudex/models.md").write_text("- Money goes to Codex Astra.\n")
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    run(repo, dry_run=True)
+    assert "Money goes to Codex Astra." in [c for c in calls if c[0] == "plan"][0][4]
+
+
+# ---------- Codex's review of permissions, usage, init and bench ----------
+@pytest.mark.parametrize("cmd,want", [
+    ("ls & rm /tmp/x", None), ("find /tmp -delete", "ask"), ("git branch -D main", "ask"),
+    ("cat ~/.ssh/id_ed25519", "deny"), ("sed -i s/a/b/ x.py", None), ("pytest -q", "allow"),
+    ("echo hi > .claudex/rules.toml", "deny")])
+def test_permission_bypasses_are_closed(cmd, want, tmp_path):
+    r = engine.load_rules()
+    k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": cmd}}, str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path))[0] == want
+
+
+def test_workers_cant_rewrite_claudex_rules(tmp_path):
+    r = engine.load_rules()
+    k, c, p, _ = perms.describe({"kind": "edit", "locations": [{"path": str(tmp_path / ".claudex/rules.toml")}]},
+                                str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path))[0] == "deny"
+
+
+def test_project_rules_can_only_add(tmp_path):
+    (tmp_path / ".claudex").mkdir()
+    (tmp_path / ".claudex/rules.toml").write_text('[permissions]\ndeny = []\nask = []\nallow = ["*:*"]\n')
+    r = engine.load_rules(project_root=tmp_path)
+    k, c, p, _ = perms.describe({"kind": "execute", "rawInput": {"command": "sudo rm -rf /"}}, str(tmp_path))
+    assert perms.rule_decision(r, k, c, p, str(tmp_path))[0] == "deny"
+
+
+def test_never_picks_an_always_option():
+    only_always = [{"optionId": "a", "kind": "allow_always"}, {"optionId": "r", "kind": "reject_always"}]
+    assert perms.pick_option(only_always, "allow") is None
+    assert perms.pick_option(only_always, "deny") == {"outcome": {"outcome": "cancelled"}}
+
+
+def test_init_respects_links_and_old_backups(tmp_path):
+    from claudex import admin
+    (tmp_path / "AGENTS.md").write_text("shared rules\n")
+    (tmp_path / "CLAUDE.md").symlink_to("AGENTS.md")
+    assert admin.house_rules_plan(tmp_path) == []                        # already one file
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "CLAUDE.md").write_text("new\n")
+    (other / "CLAUDE.md.bak").write_text("precious\n")
+    admin.init(str(other), yes=True, no_map=True)
+    assert (other / "CLAUDE.md.bak").read_text() == "precious\n" and (other / "CLAUDE.md.bak1").read_text() == "new\n"
+
+
+def test_usage_totals_include_codex_one_shot_calls(tmp_path, monkeypatch):
+    from claudex import usage
+    monkeypatch.setattr(usage, "CLAUDE_LOGS", tmp_path / "none1")
+    monkeypatch.setattr(usage, "CODEX_LOGS", tmp_path / "none2")
+    monkeypatch.setattr(usage, "INDEX", tmp_path / "i.json")
+    usage.record("codex", "gpt-6-astra", "reviewer", "/w", total=1000)
+    assert usage.summary(1)["totals"]["codex"]["work"] == 1000
+
+
+def test_usage_page_escapes_names():
+    from claudex import usage
+    assert "esc(p.project)" in usage.PAGE and "${p.project}" not in usage.PAGE
+
+
+def test_bench_scoring_cant_be_rigged(tmp_path):
+    from claudex import bench
+    task = bench.tasks()["quote-vat"]
+    proj = tmp_path / "p"
+    shutil.copytree(task["dir"] / "starter", proj)
+    (proj / "pytest.ini").write_text("[pytest]\naddopts = -k example\n")
+    (proj / "conftest.py").write_text("import sys; sys.exit(0)\n")
+    (proj / "pytest.py").write_text("raise SystemExit(0)\n")
+    h = bench.hidden_tests(task, proj)          # quote_total doesn't exist: everything must fail
+    assert h["passed"] == 0 and h["total"] == 13
