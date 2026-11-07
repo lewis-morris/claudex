@@ -43,7 +43,8 @@ class TerminalUI:
                 self.thinking = True
         elif kind == "tool_call":
             self.thinking = False
-            title = upd.get("title") or upd.get("kind") or "tool"
+            from .tui import describe_tool
+            title = describe_tool(upd, os.getcwd())[:150]
             self.tools[upd.get("toolCallId")] = title
             print(f"\n{CYAN}⏺ {title}{RESET}", flush=True)
         elif kind == "tool_call_update":

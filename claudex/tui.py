@@ -272,6 +272,9 @@ class TUI:
         self.confetti = []
         self.scroll_back = 0
         self.questions = []         # permission questions waiting for an answer, oldest first: (future, options)
+        self.tools = {}             # tool call id -> what it was doing, for its ✓/✗
+        self.detailed = set()       # tool calls whose details have been shown
+        self.live = {"who": None, "since": time.time(), "actions": 0, "now": ""}   # the live status line
         self.cmd_task = None        # a running /doctor, /rules or /log
         self.stopping = False       # Ctrl-C pressed: refuse any permission question that arrives late
         self._cache = (None, None)  # (version, fragments) so long transcripts aren't re-parsed every frame
@@ -357,9 +360,28 @@ class TUI:
         who = self.speaker if self.speaker in ("claude", "codex") else "sys"
         if kind == "agent_message_chunk":
             self._add(who, (upd.get("content") or {}).get("text", ""))
+            self._doing("writing its answer…")
+        elif kind == "agent_thought_chunk":
+            self._doing("thinking…")
         elif kind == "tool_call":
-            title = upd.get("title") or upd.get("kind") or "tool"
-            self._add(who, f"\n_⏺ {title[:110]}_\n")
+            line = describe_tool(upd, self.eng.cwd)
+            self.tools[upd.get("toolCallId")] = line
+            self.live["actions"] += 1
+            self._add(who, f"\n_⏺ {line[:150]}_\n")
+            self._doing(line)
+        elif kind == "tool_call_update":
+            tid = upd.get("toolCallId")
+            line = self.tools.get(tid)
+            if line is not None and tid not in self.detailed and (upd.get("rawInput") or upd.get("locations")
+                                                                   or (upd.get("title") and upd.get("title") != line)):
+                richer = describe_tool(dict(upd, title=upd.get("title") or line), self.eng.cwd)
+                if richer != line:      # the details arrive after the action is announced: show them (once)
+                    self.detailed.add(tid)
+                    self.tools[tid] = line = richer
+                    self._add(who, f"_   ↳ {richer.split(' · ', 1)[-1][:150]}_\n")
+                    self._doing(richer)
+            if upd.get("status") == "failed" and line:
+                self._add(who, f"\n_✗ {line[:120]} (didn't work; it'll try another way)_\n")
 
     async def permission(self, params):
         if self.stopping or not (self.busy and not self.busy.done()):
@@ -400,9 +422,20 @@ class TUI:
             if not fut.done():
                 fut.set_result({"outcome": {"outcome": "cancelled"}})
 
+    def _doing(self, what):
+        self.live["now"] = what
+        self._refresh()
+
     def activity(self, who, state, target=None):
         if who in ("claude", "codex"):
             self.speaker = who
+        labels = {"thinking": ("The lead", "planning…"), "working": (None, "starting…"),
+                  "reviewing": (None, "checking the other's work…"), "checking": (None, "giving a second opinion…")}
+        if state in labels:
+            name, now = labels[state]
+            self.live = {"who": name or self.NAMES.get(who, "Claudex"), "since": time.time(), "actions": 0, "now": now}
+        elif state in ("done", "stopped"):
+            self.live = {"who": None, "since": time.time(), "actions": 0, "now": ""}
         if state == "reviewing" and target in ("claude", "codex") and self.playful:
             self.banana = (target, who, time.time())        # the work is tossed across to be checked
         if state == "done" and self.playful:
@@ -718,7 +751,13 @@ class TUI:
         if self.questions:
             left = " Answer the permission question: type its number "
         elif self.busy and not self.busy.done():
-            left = " Working… Ctrl-C to stop "
+            lv = self.live
+            secs = int(time.time() - lv["since"])
+            spin = self._spin() if self.moving else "●"
+            who = lv["who"] or "Claudex"
+            acts = f" · {lv['actions']} action{'s' if lv['actions'] != 1 else ''}" if lv["actions"] else ""
+            now = f" · {lv['now'][:70]}" if lv["now"] else ""
+            left = f" {spin} {who} is working · {secs // 60}:{secs % 60:02d}{acts}{now} · no input needed · Ctrl-C stops "
         else:
             left = " Ready "
         right = (f" {ROUTES[e.route]} · effort {e.effort} · checks {CHECKS[e.checks]}"
@@ -968,6 +1007,29 @@ class TUI:
         while True:
             await asyncio.sleep({"playful": 0.08, "calm": 0.2, "off": 0.5}[self.prefs["style"]])
             self._refresh()
+
+
+def describe_tool(upd, cwd):
+    """'Read · support.js', 'Terminal · npm test', 'Search · "font"': what a tool call is actually doing."""
+    title = str(upd.get("title") or upd.get("kind") or "tool").strip()
+    raw = upd.get("rawInput") if isinstance(upd.get("rawInput"), dict) else {}
+    detail = ""
+    for key in ("command", "cmd", "file_path", "path", "notebook_path", "pattern", "query", "url", "description"):
+        v = raw.get(key)
+        if v:
+            detail = " ".join(v) if isinstance(v, list) else str(v)
+            break
+    if not detail and upd.get("locations"):
+        detail = str((upd["locations"][0] or {}).get("path") or "")
+    detail = " ".join(detail.split())
+    root = str(cwd).rstrip("/")
+    for prefix in (f"cd {root} && ", f'cd "{root}" && ', f"cd {root}; "):
+        if detail.startswith(prefix):        # "cd <the project> && npm test" is just "npm test"
+            detail = detail[len(prefix):]
+    detail = detail.replace(root + "/", "")
+    if detail and detail.lower() not in title.lower():
+        return f"{title} · {detail}"
+    return title
 
 
 def _mix(a, b, t):

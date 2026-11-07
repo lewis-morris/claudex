@@ -1500,3 +1500,19 @@ def test_session_load_is_careful(tmp_path, monkeypatch):
     other.mkdir()
     with pytest.raises(server.RpcError):
         asyncio.run(srv.on_request("session/load", {"sessionId": "claudex-x", "cwd": str(other), "mcpServers": []}))
+
+
+def test_live_status_says_what_is_happening(tmp_path):
+    from claudex.tui import describe_tool
+    T, t, e = _tui(tmp_path)
+    assert describe_tool({"title": "Terminal", "rawInput": {"command": "npm  test"}}, "/p") == "Terminal · npm test"
+    assert describe_tool({"title": "Read", "locations": [{"path": "/p/support.js"}]}, "/p") == "Read · support.js"
+
+    async def go():
+        t.busy = asyncio.ensure_future(asyncio.sleep(30))
+        t.activity("claude", "working")
+        await t.update({"sessionUpdate": "tool_call", "toolCallId": "1", "title": "Read",
+                        "locations": [{"path": str(tmp_path / "support.js")}]})
+        return "".join(x for _, x in t.status())
+    line = asyncio.run(go())
+    assert "Claude is working" in line and "1 action" in line and "support.js" in line and "no input needed" in line
