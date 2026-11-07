@@ -35,7 +35,7 @@ def error_is_limit(text):
     return bool(ERROR_RE.search(text or ""))
 
 
-X
+_LEAD_IN = re.compile(r"^[^\w`'\"]*(?:(?:api )?error:?\s*|warning:?\s*)?", re.I)   # ⚠ ✗ ⎿ "Error:" …
 
 
 def reply_is_limit(text):
