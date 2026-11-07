@@ -104,6 +104,12 @@ def code_stamp():
 STARTED_STAMP = code_stamp()      # the code this process is running
 
 
+def code_label(stamp=None):
+    """'code from Sat 07 Nov 12:34': which version of Claudex this is, in words."""
+    import datetime
+    return "code from " + datetime.datetime.fromtimestamp(stamp or STARTED_STAMP).strftime("%a %d %b %H:%M")
+
+
 def stale_workers():
     """Claudex ACP workers (Agents of Empires sessions) started before the code last changed:
     [(pid, aoe_session_id or None, minutes_running)]."""

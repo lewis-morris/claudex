@@ -50,6 +50,8 @@ def chat_parser():
     ap.add_argument("--plain", action="store_true", help="simple line-by-line chat instead of the full screen")
     ap.add_argument("--resume", nargs="?", const="pick", metavar="N",
                     help="carry on an earlier conversation in this project (no number: show the list)")
+    ap.add_argument("--version", action="version",
+                    version=f"Claudex, {__import__('claudex.paths', fromlist=['x']).code_label()}")
     ap.add_argument("-c", "--continue", dest="cont", action="store_true", help="carry on the most recent conversation")
     return ap
 

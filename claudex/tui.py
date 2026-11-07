@@ -28,7 +28,7 @@ from . import fun
 from .cli import ARG_CHOICES, make_completer
 from .commands import COMMANDS, expand_skill, load_skills
 from .engine import CHECKS, MODES, ROUTES
-from .paths import self_command
+from .paths import code_label, self_command
 
 PREFS = pathlib.Path.home() / ".config/claudex/ui.json"
 BLOCK_CHARS = 60_000     # one agent's run of output kept on screen
@@ -1442,7 +1442,7 @@ def _mix(a, b, t):
 async def run_tui(eng):
     tui = TUI(eng)
     eng.ui = tui
-    tui.blocks.append({"who": "sys", "text": f"_{fun.pick(fun.HELLO)}_\n_Working in {pathlib.Path(eng.cwd).name}/_"})
+    tui.blocks.append({"who": "sys", "text": f"_{fun.pick(fun.HELLO)}_\n_Working in {pathlib.Path(eng.cwd).name}/ · Claudex {code_label()}_"})
     app = tui.build()
     if eng.resume_request:                       # claudex --resume [N] / -c
         tui.resume("" if eng.resume_request == "pick" else str(eng.resume_request))
