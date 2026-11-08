@@ -102,10 +102,9 @@ def _exclude_links(project_root, rels):
     ex.write_text(text + ("" if text.endswith("\n") or not text else "\n") + "\n".join(new) + "\n")
 
 
-def record_base(project_root, path):
-    """The main folder as it is now, when a job starts changing it: earlier finished work that nobody
-    committed included. Saved as a tree in the project's own git objects (nothing else in its git changes), so
-    a copy made while this job works starts from here, not from the last commit."""
+def _snapshot(project_root):
+    """(head, tree): the folder as it is now, earlier finished work that nobody committed included, saved as a
+    tree in the project's own git objects (nothing else in its git changes)."""
     head = _ok(_git(project_root, "rev-parse", "HEAD"), "no commit").strip()
     fd, tmp = tempfile.mkstemp(prefix="claudex-base-")
     os.close(fd)
@@ -114,13 +113,24 @@ def record_base(project_root, path):
     try:
         for args in (("read-tree", "HEAD"), ("add", "-A", "--", ".", *SKIP_SPECS)):
             r = subprocess.run(["git", *args], cwd=project_root, env=env, capture_output=True, text=True, timeout=300)
-            _ok(r, "couldn't record the folder")
+            # git says so (and exits 1) when a skipped folder is ignored anyway; everything else was still added
+            if r.returncode != 0 and not ("are ignored by one of your .gitignore" in r.stderr
+                                          and "fatal:" not in r.stderr):
+                _ok(r, "couldn't record the folder")
         tree = _ok(subprocess.run(["git", "write-tree"], cwd=project_root, env=env, capture_output=True, text=True,
                                   timeout=120), "couldn't record the folder").strip()
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
-    pathlib.Path(path).write_text(json.dumps({"head": head, "tree": tree}))
+    return head, tree
+
+
+def record_base(project_root, path, **about):
+    """The main folder as it is now, when a job starts changing it, so a copy made while this job works starts
+    from here, not from the last commit. `about` (what the job was asked, its steps) lets other jobs see what's
+    being worked on."""
+    head, tree = _snapshot(project_root)
+    pathlib.Path(path).write_text(json.dumps({"head": head, "tree": tree, **about}))
     return tree
 
 
@@ -131,17 +141,24 @@ def folder_for(project_root, job_id):
 
 
 def create(project_root, job_id, dont_link=(), base_file=None):
-    """Make the copy. Returns {"path", "branch", "base", "tree", "from_commit"}; raises WorktreeError if git
+    """Make the copy. Returns {"path", "branch", "base", "tree", "from_now"}; raises WorktreeError if git
     can't. It starts from the folder as the other job found it (`base_file`, written by record_base), with that
-    earlier work uncommitted as it is there; without one, from the last commit."""
+    earlier work uncommitted as it is there; without one, from the folder as it is now (part-way through the
+    other job's changes, which then count as already there)."""
     recorded = None
     try:
         recorded = json.loads(pathlib.Path(base_file).read_text()) if base_file else None
     except Exception:
         pass
-    base = (recorded or {}).get("head") or _ok(_git(project_root, "rev-parse", "HEAD"), "no commit to start from").strip()
+    if not (recorded or {}).get("tree"):
+        # The job with the folder didn't record how it found it (an older Claudex, or it couldn't): start from
+        # the folder as it is now, so work nobody committed is in the copy rather than clashing on the way back.
+        recorded = None
+        head, tree = _snapshot(project_root)
+    else:
+        head, tree = recorded["head"], recorded["tree"]
+    base = head
     head_tree = _ok(_git(project_root, "rev-parse", f"{base}^{{tree}}"), "couldn't read the last commit").strip()
-    tree = (recorded or {}).get("tree") or head_tree
     path = folder_for(project_root, job_id)
     branch = f"claudex/{job_id}"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -165,14 +182,15 @@ def create(project_root, job_id, dont_link=(), base_file=None):
     except Exception as e:
         remove(project_root, {"path": str(path), "branch": branch}, keep_branch=False)
         raise WorktreeError(f"couldn't set up the copy: {e}")
-    return {"path": str(path), "branch": branch, "base": base, "tree": tree, "from_commit": recorded is None,
+    return {"path": str(path), "branch": branch, "base": base, "tree": tree, "from_now": recorded is None,
             "linked": linked}
 
 
 def _clashes(stderr):
     files = []
     for line in stderr.splitlines():
-        m = re.match(r"error: (?:patch failed: )?(.+?)(?::\d+)?: ", line) or re.match(r"error: patch failed: (.+):\d+$", line)
+        m = (re.match(r"error: patch failed: (.+?):\d+$", line)
+             or re.match(r"error: (.+?): (?:already exists in working directory|does not exist in index|patch does not apply)", line))
         if m and m.group(1) not in files:
             files.append(m.group(1))
     return files

@@ -27,6 +27,19 @@ class Lock:
         self.fd = fd
         return True
 
+    def held_elsewhere(self):
+        """Whether another process holds it now (only looks: takes nothing, writes nothing)."""
+        if not self.path.exists():
+            return False
+        fd = os.open(self.path, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        finally:
+            os.close(fd)
+        return False
+
     async def acquire(self, on_wait=None, poll=2.0):
         if self.try_acquire():
             return

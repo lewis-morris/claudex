@@ -3416,7 +3416,9 @@ def test_a_second_job_works_in_its_own_copy_and_brings_its_changes_back(job, cop
     FakeChild.script = [work]
     e, ui, stop = run(repo)
     assert e.ok and "separate copy" in ui.all() and "Brought this job's changes back" in ui.all()
-    assert seen["cwd"] != str(repo) and seen["linked"] == ("x\n", "secret\n") and not seen["theirs"]
+    # the other job didn't record how it found the folder, so the copy starts from the folder as it is now
+    assert seen["cwd"] != str(repo) and seen["linked"] == ("x\n", "secret\n") and seen["theirs"]
+    assert "part-way through" in ui.all()
     assert "separate copy" in FakeChild.started[-1].prompts[0]          # the worker is told where it is
     review = [c for c in calls if c[0] == "review"][0][4]
     assert "mine = 1" in review and "half done" not in review          # its check sees only its own work
@@ -3451,6 +3453,8 @@ def test_a_copy_that_clashes_is_kept_and_the_main_folder_left_alone(job, copies)
 
 def test_a_workers_own_commits_in_a_copy_come_back_as_commits(job, copies):
     repo, calls, answers = job
+    with open(repo / ".git" / "info" / "exclude", "a") as f:     # a clean folder: the copy starts at the last commit
+        f.write("claudex-data/\n")
     answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
     answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
     other = _hold_folder(repo)
@@ -3605,3 +3609,53 @@ def test_an_answer_isnt_blamed_for_another_jobs_edits(job, copies):
     other.release()
     assert e.ok and "separate copy" not in ui.all()      # answered in the main folder, without waiting
     assert not any(c[0] in ("review", "map") for c in calls)
+
+
+def test_the_folder_is_recorded_when_claudex_own_folder_is_gitignored(job):
+    # git exits 1 when an excluded path is ignored anyway; the record must still be made
+    repo, calls, answers = job
+    with open(repo / ".git" / "info" / "exclude", "a") as f:
+        f.write(".claudex/\n")
+    (repo / "earlier.py").write_text("earlier = 1\n")
+    (repo / ".claudex").mkdir(exist_ok=True)
+    tree = worktrees.record_base(str(repo), repo / ".claudex" / "work.json", request="r", steps=["s"])
+    assert "earlier.py" in git(repo, "ls-tree", "--name-only", tree)
+    assert json.loads((repo / ".claudex" / "work.json").read_text())["steps"] == ["s"]
+
+
+def test_clashing_files_are_named_from_what_git_says():
+    said = ("error: src/a.mjs: already exists in working directory\n"
+            "error: patch failed: test/fake-dom.js:12\nerror: test/fake-dom.js: patch does not apply\n")
+    assert worktrees._clashes(said) == ["src/a.mjs", "test/fake-dom.js"]
+
+
+def test_a_plan_is_told_what_another_job_is_already_doing(job, copies):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    other = _hold_folder(repo)
+    worktrees.record_base(str(repo), repo / ".claudex" / "work.json", request="Build the phone app",
+                          steps=["Android shell", "Deploy"])
+
+    async def work(child):
+        other.release()
+        return "end_turn", "done"
+    FakeChild.script = [work]
+    run(repo)
+    plan = [c for c in calls if c[0] == "plan"][0][4]
+    assert "ANOTHER CLAUDEX JOB" in plan and "Build the phone app" in plan and "Android shell" in plan
+
+
+def test_a_plan_isnt_told_about_a_job_that_has_finished(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    (repo / ".claudex").mkdir(exist_ok=True)
+    worktrees.record_base(str(repo), repo / ".claudex" / "work.json", request="Build the phone app")
+    FakeChild.script = [lambda child: _done()]
+    run(repo)
+    assert "ANOTHER CLAUDEX JOB" not in [c for c in calls if c[0] == "plan"][0][4]
+
+
+async def _done():
+    return "end_turn", "done"

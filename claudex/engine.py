@@ -1103,6 +1103,7 @@ class Engine:
                    if rules.get("_lead_notes") else "")
                 + f"\nPROJECT FILES ({len(files)}):\n" + "\n".join(files[:300]) + "\n\n"
                 + (f"AT THEIR USAGE LIMIT RIGHT NOW (don't give them steps): {', '.join(limited)}\n" if limited else "")
+                + self._other_job_note()
                 + f"USER MESSAGE:\n{text}\n\n"
                 "Write each step's instructions so the worker can act without seeing this message.\n")
             if critique:
@@ -1564,7 +1565,7 @@ class Engine:
             return
         lock = Lock(self.root / "work.lock")
         if lock.try_acquire():
-            await self._took_folder(lock)
+            await self._took_folder(lock, steps)
             return
         par = rules.get("parallel", {})
         stopped_here = False
@@ -1586,21 +1587,42 @@ class Engine:
                 self._enter_copy()
                 await self.ui.say("_Another Claudex job is changing files in this project, so this one works in a "
                                   "separate copy and brings its changes back when it's done._\n\n"
-                                  + ("_(The other job didn't say how it found the folder, as it runs an older "
-                                     "Claudex, so the copy starts from the last commit: work since then that "
-                                     "nobody committed isn't in it.)_\n\n" if wt.get("from_commit") else ""))
+                                  + ("_(The other job didn't say how it found the folder, so the copy starts "
+                                     "from the folder as it is now, part-way through that job's changes.)_\n\n"
+                                     if wt.get("from_now") else ""))
                 return
         async with self._busy("wait"):
             await lock.acquire(lambda: self.ui.say(
                 "_Another Claudex job is changing files in this project; waiting for it to finish…_\n\n"))
-        await self._took_folder(lock)
+        await self._took_folder(lock, steps)
 
-    async def _took_folder(self, lock):
+    def _other_job_note(self):
+        """What another Claudex job (another conversation) is changing in this project right now, so the plan
+        doesn't build the same thing a second time alongside it."""
+        if self._work_lock:
+            return ""
+        try:
+            other = json.loads((self.root / "work.json").read_text())
+        except Exception:
+            return ""
+        if not other.get("request") or not Lock(self.root / "work.lock").held_elsewhere():
+            return ""
+        steps = "".join(f"\n - {t}" for t in other.get("steps") or [] if t)
+        return ("ANOTHER CLAUDEX JOB IS WORKING IN THIS PROJECT RIGHT NOW (a different conversation). It was asked:\n"
+                f"{other['request']}\nIts steps:{steps or ' (not listed)'}\n"
+                "Don't plan work it is already doing: two jobs building the same thing side by side waste the time "
+                "and clash when the second brings its changes back. If this message asks for the same work, plan "
+                "only what it doesn't cover; if that leaves nothing, answer with one answer_only step that says "
+                "the other conversation is already doing it and to ask again here once it has finished.\n\n")
+
+    async def _took_folder(self, lock, steps=()):
         """This job changes the main folder: record how it found it, so a copy made meanwhile starts from there."""
         self._work_lock = lock
         if worktrees.can_use(self.project_root):
             try:
-                await asyncio.to_thread(worktrees.record_base, self.project_root, self.root / "work.json")
+                await asyncio.to_thread(worktrees.record_base, self.project_root, self.root / "work.json",
+                                        request=((self._job or {}).get("request") or "")[:600],
+                                        steps=[s.get("title", "") for s in steps][:12])
             except Exception as e:
                 self._trace(ev="error", where="record_base", error=str(e)[:300])
 
