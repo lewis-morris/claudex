@@ -3659,3 +3659,40 @@ def test_a_plan_isnt_told_about_a_job_that_has_finished(job):
 
 async def _done():
     return "end_turn", "done"
+
+
+def test_a_step_that_keeps_getting_further_isnt_stopped_after_three_rounds(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex", "gpt-6.1-sol", "medium")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = [{"verdict": "fix", "issues": [f"item {n} not done"], "summary": ""} for n in range(1, 5)] \
+        + [{"verdict": "pass", "issues": [], "summary": "ok"}]
+    FakeChild.script = [("a.py", f"v{n}\n", f"part {n}") for n in range(1, 6)]
+    e, ui, stop = run(repo)
+    assert e.ok and "after 3 attempts" not in ui.all()
+    assert "Keep going until all of it is done" in FakeChild.started[0].prompts[1]
+
+
+def test_a_step_with_no_new_changes_still_stops_after_three(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex", "gpt-6.1-sol", "medium")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = [{"verdict": "fix", "issues": [f"item {n} not done"], "summary": ""} for n in range(1, 9)]
+    FakeChild.script = [("a.py", "v1\n", "part 1")] + [(None, "", "nothing more") for _ in range(8)]
+    e, ui, stop = run(repo)
+    assert not e.ok and "after 3 attempts" in ui.all()
+
+
+def test_carry_on_after_a_quick_answer_goes_back_to_the_unfinished_work(job):
+    repo, calls, answers = job
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    now = datetime.datetime.now().isoformat(timespec="seconds")
+    rows = [dict(kind="step", at=now, step=2, title="Phase 0b: switch off accounts", agent="codex", model="gpt-6-astra",
+                 effort="high", verdict="fix"),
+            dict(kind="step", at=now, step=1, title="Answer: are you working?", agent="claude", model="sonnet",
+                 effort="medium", verdict="no_changes")]
+    e.log.parent.mkdir(parents=True, exist_ok=True)
+    e.log.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    rules = engine.load_rules(e.rules_path, e.project_root, e.models_file)
+    s = e._follow_up("carry on", rules)["steps"][0]
+    assert s["agent"] == "codex" and "Phase 0b" in s["title"] and "Answer" not in s["title"]
+    q = e._follow_up("what's left?", rules)["steps"][0]
+    assert q["agent"] == "claude"                                   # a question still goes to the last one

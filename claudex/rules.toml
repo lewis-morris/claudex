@@ -27,6 +27,7 @@ codex = { model = "gpt-6-astra", effort = "high" }
 [review]
 enabled = true
 max_attempts = 3          # 1st try, fix once at the same level, then one step up the ladder
+max_rounds = 8            # rounds that got further (new changes, new asks) don't count against max_attempts, up to this many
 skip_low_effort = false   # true: low-effort steps aren't reviewed (cheaper, less safe)
 diff_limit = 60000        # characters of diff sent to the reviewer (it's told if it was cut short)
 light_for_docs = true     # a step that only changed writing (.md, .txt, docs) gets a quicker, cheaper check

@@ -220,6 +220,9 @@ QUESTIONS_SHAPE = (
     "where. Before asking anything, check what the user has already said in this conversation and the "
     "project's decision records: drop questions that are already answered, and mark repeats '(still open)'.")
 REPLY_SHAPE = (
+    "Finish the whole step before you reply: your reply ends your turn, so don't stop part-way to report "
+    "progress or to say what's still to do (a part-done step is sent straight back to you). Stop early only "
+    "for something you can't do yourself, and say what it is.\n"
     "Your reply is shown to the user as it is, and the other agent checks it before they act on it. If you "
     "changed files, end with this, in plain British English, leaving out any line that would be empty:\n"
     "**Done:** one or two sentences on the outcome.\n"
@@ -313,6 +316,14 @@ def repo_root(cwd):
         return out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else None
     except Exception:
         return None
+
+
+def _answer_title(title):
+    """A quick answer's step, not work: "Answer: …", or carrying on from one."""
+    t = str(title or "")
+    while t.startswith("Carry on: "):
+        t = t[len("Carry on: "):]
+    return t.startswith("Answer: ")
 
 
 class StepFailed(Exception):
@@ -1366,14 +1377,19 @@ class Engine:
         question = not reply and lead.get("quick_questions", True) and is_question(text)
         if not (reply or question):
             return None
-        last = None
+        last = work = None
         try:
             for line in self.log.read_text(errors="replace").splitlines()[-200:]:
                 r = json.loads(line)
                 if r.get("kind") == "step" and r.get("agent") in ("claude", "codex") and r.get("model"):
                     last = r
+                    if not _answer_title(r.get("title")):
+                        work = r
         except Exception:
             return None
+        if reply and work and last is not work and work.get("verdict") not in ("pass", "no_changes", "unreviewed"):
+            # "carry on" after a quick answer means the work that answer interrupted, if it didn't finish
+            last = work
         if not last:
             return None
         try:
@@ -1383,6 +1399,8 @@ class Engine:
         if age > rules.get("lead", {}).get("quick_followup_hours", 12) * 3600:
             return None
         title = str(last.get("title") or "the last step")
+        while title.startswith("Carry on: "):
+            title = title[len("Carry on: "):]
         if question:
             return {"steps": [{
                 "title": ("Answer: " + " ".join(text.split()))[:90], "agent": last["agent"], "model": last["model"],
@@ -1741,6 +1759,11 @@ class Engine:
             model, effort = s["model"], s["effort"]
             review = rules.get("review", {})
             max_attempts = int(review.get("max_attempts", 3))
+            # A round in which the worker got further (changed files since the last check, and the checker now
+            # asks for something different) doesn't use up an attempt: big steps often come back part-done, and
+            # stopping them after three rounds of real progress wastes the work. Up to max_rounds in all.
+            max_rounds = max(max_attempts, int(review.get("max_rounds", 8)))
+            strikes = 0
             limits = rules.get("limits", {})
             step_timeout = limits.get("step_timeout_min", 180) * 60
             idle = limits.get("step_idle_min", 20) * 60
@@ -1755,7 +1778,7 @@ class Engine:
                                 "steps_in_job": n}
             asked = []     # what the last review asked for, so the re-check confirms each one
             checked = None  # the snapshot the last review saw: a re-check gets only the fixes made since
-            for attempt in range(1, max_attempts + 1):
+            for attempt in range(1, max_rounds + 1):
                 if self.cancelled:
                     raise StepFailed("cancelled.")
                 try:
@@ -1888,13 +1911,15 @@ class Engine:
                 tier = self._review_tier(files, review)
                 self._step_extra["review_tier"] = tier
                 fixes_only = False
-                if asked and checked and review.get("recheck_fixes_only", True):
+                progressed = bool(files) if not checked else False
+                if asked and checked:
                     try:
                         fdiff, ffiles, fcut = gitsnap.diff(self.project_root, checked, after,
                                                            int(review.get("diff_limit", 60000)))
                     except gitsnap.SnapshotError:
                         ffiles = []
-                    if ffiles:     # the whole step was reviewed last time: send just what changed since
+                    progressed = bool(ffiles)
+                    if ffiles and review.get("recheck_fixes_only", True):     # the whole step was reviewed last time: send just what changed since
                         diff, truncated, fixes_only = fdiff, fcut, True
                         self._step_extra.update(diff_chars=len(diff), diff_truncated=truncated)
                 try:
@@ -1911,7 +1936,10 @@ class Engine:
                     raise StepFailed("cancelled.")
                 if verdict["verdict"] in ("pass", "unreviewed"):
                     return True
-                if attempt == max_attempts:
+                # it got further: it changed files since the last check, and the checker asks for something else now
+                got_further = attempt > 1 and progressed and list(verdict["issues"]) != asked
+                strikes += 0 if got_further else 1
+                if strikes >= max_attempts or attempt == max_rounds:
                     issues = "".join(f"\n- {x}" for x in verdict["issues"])
                     raise StepFailed(f"the review still found problems after {attempt} attempts:{issues}")
                 if attempt >= 2:
@@ -1922,7 +1950,9 @@ class Engine:
                 asked, checked = list(verdict["issues"]), after
                 message = ("The reviewer (the other agent) checked your changes and asks for these fixes:\n"
                            + "".join(f"- {x}\n" for x in verdict["issues"])
-                           + "\nFix them, re-check your work, and end with the same short handoff.")
+                           + "\nFix them, re-check your work, and end with the same short handoff. Keep going until "
+                             "all of it is done: don't stop part-way to report progress, because a part-done "
+                             "handoff only comes straight back.")
         finally:
             if chrome:
                 chrome.release()
