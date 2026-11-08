@@ -193,7 +193,9 @@ def job(repo, monkeypatch):
     calls = []
     answers = {}
 
-    async def fake_ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None):
+    async def fake_ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None, **kw):
+        headless.SESSION.set("plan-1" if kw.get("keep") else None)
+        FakeChild.ask_options = getattr(FakeChild, "ask_options", []) + [kw]
         kind = ("gate" if role == "gatekeeper" else "plan" if schema is engine.PLAN_SCHEMA else "opinion" if schema is engine.OPINION_SCHEMA
                 else "review" if schema is engine.REVIEW_SCHEMA else "final" if schema is engine.FINAL_SCHEMA
                 else "map")
@@ -211,7 +213,7 @@ def job(repo, monkeypatch):
     monkeypatch.setattr(engine, "Child", FakeChild)
     import tempfile
     monkeypatch.setattr(engine, "CHROME_LOCK", pathlib.Path(tempfile.mkdtemp()) / "chrome.lock")  # not the real key
-    FakeChild.script, FakeChild.started = [], []
+    FakeChild.script, FakeChild.started, FakeChild.ask_options = [], [], []
     answers["map"] = {"map": "# Map\n"}
     answers["final"] = {"verdict": "pass", "problems": [], "summary": "fits"}
     return repo, calls, answers
@@ -3228,6 +3230,24 @@ def test_a_busy_worker_is_not_stopped_however_long_it_takes(job, monkeypatch):
     assert e.ok and "no sign of work" not in ui.all()
 
 
+def test_a_worker_kept_from_an_earlier_job_isnt_stuck_before_it_starts(job, monkeypatch):
+    # A reused worker last showed signs of work during the previous job, maybe an hour ago. That silence
+    # belongs to the gap between jobs, not to this step.
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    _quick_limits(monkeypatch, step_idle_min=0.02)         # 1.2 s of silence counts as stuck
+
+    async def slow_start(child):
+        child.quiet_for = lambda: 3600                     # its clock is still from the last job
+        await asyncio.sleep(0.4)
+        pathlib.Path(child.cwd, "a.py").write_text("a = 1\n")
+        return "end_turn", "done"
+    FakeChild.script = [slow_start]
+    e, ui, stop = run(repo)
+    assert e.ok and "no sign of work" not in ui.all()
+
+
 def test_a_quiet_running_action_gets_longer_before_its_worker_counts_as_stuck(job, monkeypatch):
     repo, calls, answers = job
     answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
@@ -3286,3 +3306,302 @@ def test_a_job_stopped_during_its_check_goes_back_to_that_worker_and_gets_checke
     assert not any(c[0] == "plan" for c in calls)
     review = [c for c in calls if c[0] == "review"][0][4]
     assert "half = 1" in review and "rest = 2" in review
+
+
+def _vat_plans():
+    first = {"steps": [step()], "big_decisions": [{"decision": "store VAT as float", "why": "simple",
+                                                    "alternatives": "integer pence"}], "concern_responses": []}
+    second = {"steps": [step(title="pence")], "big_decisions": first["big_decisions"],
+              "concern_responses": [{"concern": "floats round badly", "accepted": True, "why": "use pence"}]}
+    return first, second
+
+
+def test_a_replan_carries_on_the_planners_own_conversation(job, monkeypatch):
+    repo, calls, answers = job
+    forgot = []
+    monkeypatch.setattr(headless, "forget", forgot.append)
+    answers["plan"] = list(_vat_plans())
+    answers["opinion"] = {"verdict": "concerns", "concerns": ["floats round badly"], "suggestion": "pence"}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "pence\n", "done")]
+    e, ui, stop = run(repo)
+    plans = [c for c in calls if c[0] == "plan"]
+    opts = [o for o in FakeChild.ask_options if o]
+    assert opts[0] == {"keep": True} and opts[1] == {"resume": "plan-1"}
+    assert "floats round badly" in plans[1][4] and "PROJECT FILES" not in plans[1][4]   # only the concerns
+    assert "PROJECT FILES" in plans[0][4]
+    assert forgot == ["plan-1"] and e._plan_session is None     # the kept conversation is deleted afterwards
+    rows = [json.loads(l) for l in (repo / ".claudex/trace.jsonl").read_text().splitlines()]
+    assert any(r["ev"] == "call" and r.get("role") == "lead" and r.get("resumed") for r in rows)
+
+
+def test_if_the_planners_conversation_cant_be_resumed_it_plans_afresh(job, monkeypatch):
+    repo, calls, answers = job
+    monkeypatch.setattr(headless, "forget", lambda sid: None)
+    first, second = _vat_plans()
+    answers["plan"] = [first, headless.HeadlessError("claude: No conversation found"), second]
+    answers["opinion"] = {"verdict": "concerns", "concerns": ["floats round badly"], "suggestion": "pence"}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "pence\n", "done")]
+    e, ui, stop = run(repo)
+    plans = [c for c in calls if c[0] == "plan"]
+    assert e.ok and len(plans) == 3 and "PROJECT FILES" in plans[2][4] and "floats round badly" in plans[2][4]
+
+
+def test_a_plan_with_no_big_decisions_keeps_nothing(job, monkeypatch):
+    repo, calls, answers = job
+    forgot = []
+    monkeypatch.setattr(headless, "forget", forgot.append)
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "done")]
+    run(repo)
+    assert forgot == ["plan-1"]
+
+
+def test_only_a_kept_or_resumed_claude_call_is_saved():
+    plain = headless.claude_cmd("opus", "high", {}, "Read")
+    assert "--no-session-persistence" in plain and "--resume" not in plain
+    assert "--no-session-persistence" not in headless.claude_cmd("opus", "high", {}, "Read", keep=True)
+    r = headless.claude_cmd("opus", "high", {}, "Read", resume="abc")
+    assert r[r.index("--resume") + 1] == "abc"
+
+
+def test_the_lead_is_told_to_stage_very_big_jobs(job):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step()], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    FakeChild.script = [("a.py", "1\n", "done")]
+    run(repo, "migrate every customer to the new store")
+    lead = [c for c in calls if c[0] == "plan"][0][4]
+    assert "split it into stages" in lead and "FEWEST" in lead
+
+
+# ---------- several jobs in one project ----------
+from claudex import worktrees  # noqa: E402
+
+
+@pytest.fixture
+def copies(tmp_path, monkeypatch):
+    monkeypatch.setattr(worktrees, "HOME", tmp_path / "copies")
+    return tmp_path / "copies"
+
+
+def _hold_folder(repo):
+    """Another Claudex job changing files in the main folder."""
+    other = Lock(repo / ".claudex" / "work.lock")
+    assert other.try_acquire()
+    return other
+
+
+def test_a_second_job_works_in_its_own_copy_and_brings_its_changes_back(job, copies):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "lib.js").write_text("x\n")
+    (repo / "ignored.txt").write_text("secret\n")
+    (repo / "theirs.py").write_text("half done by the other job\n")   # the other job's uncommitted work
+    other = _hold_folder(repo)
+    seen = {}
+
+    async def work(child):
+        seen["cwd"] = child.cwd
+        seen["linked"] = (pathlib.Path(child.cwd, "node_modules", "lib.js").read_text(),
+                          pathlib.Path(child.cwd, "ignored.txt").read_text())
+        seen["theirs"] = pathlib.Path(child.cwd, "theirs.py").exists()
+        pathlib.Path(child.cwd, "mine.py").write_text("mine = 1\n")
+        other.release()                      # the other job finishes meanwhile
+        return "end_turn", "done"
+    FakeChild.script = [work]
+    e, ui, stop = run(repo)
+    assert e.ok and "separate copy" in ui.all() and "Brought this job's changes back" in ui.all()
+    assert seen["cwd"] != str(repo) and seen["linked"] == ("x\n", "secret\n") and not seen["theirs"]
+    assert "separate copy" in FakeChild.started[-1].prompts[0]          # the worker is told where it is
+    review = [c for c in calls if c[0] == "review"][0][4]
+    assert "mine = 1" in review and "half done" not in review          # its check sees only its own work
+    assert (repo / "mine.py").read_text() == "mine = 1\n" and (repo / "theirs.py").exists()
+    assert not pathlib.Path(seen["cwd"]).exists()                       # the copy is gone
+    assert "claudex/" not in git(repo, "branch")
+    shown = git(repo, "status", "--short", "--", ".", ":!claudex-data")
+    assert shown.split() == ["??", "mine.py", "??", "theirs.py"]   # theirs untouched, mine added, no links
+    assert e.project_root == str(repo) and not (e.notes_dir / "worktree.json").exists()
+
+
+def test_a_copy_that_clashes_is_kept_and_the_main_folder_left_alone(job, copies):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    other = _hold_folder(repo)
+    seen = {}
+
+    async def work(child):
+        seen["cwd"] = child.cwd
+        pathlib.Path(child.cwd, "a.py").write_text("x = 'mine'\n")
+        (repo / "a.py").write_text("x = 'theirs'\n")                    # the other job changed the same line
+        other.release()
+        return "end_turn", "done"
+    FakeChild.script = [work]
+    e, ui, stop = run(repo)
+    assert not e.ok and "Couldn't bring this job's changes back" in ui.all() and "`a.py`" in ui.all()
+    assert (repo / "a.py").read_text() == "x = 'theirs'\n"
+    assert pathlib.Path(seen["cwd"], "a.py").read_text() == "x = 'mine'\n"   # kept, on its branch
+    assert "claudex/" in git(repo, "branch")
+
+
+def test_a_workers_own_commits_in_a_copy_come_back_as_commits(job, copies):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    other = _hold_folder(repo)
+
+    async def work(child):
+        pathlib.Path(child.cwd, "done.py").write_text("done = 1\n")
+        git(child.cwd, "add", "done.py")
+        git(child.cwd, "commit", "-qm", "Add done")
+        pathlib.Path(child.cwd, "wip.py").write_text("wip = 1\n")
+        other.release()
+        return "end_turn", "done"
+    FakeChild.script = [work]
+    e, ui, stop = run(repo)
+    assert e.ok and "Add done" in git(repo, "log", "--oneline", "-1")
+    assert git(repo, "status", "--short", "--", ".", ":!claudex-data").split() == ["??", "wip.py"]
+
+
+def test_a_job_stopped_in_its_copy_carries_on_there(job, copies, monkeypatch):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex", title="Migrate")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    _quick_limits(monkeypatch, step_idle_min=0.01, step_idle_tool_min=10)
+    other = _hold_folder(repo)
+    seen = []
+
+    async def half_then_quiet(child):
+        seen.append(child.cwd)
+        pathlib.Path(child.cwd, "half.py").write_text("half = 1\n")
+        child.quiet_for = lambda: 3600
+        await asyncio.sleep(30)
+
+    async def rest(child):
+        seen.append(child.cwd)
+        pathlib.Path(child.cwd, "rest.py").write_text("rest = 2\n")
+        return "end_turn", "finished"
+    FakeChild.script = [half_then_quiet, rest]
+    ui = UI()
+    e = engine.Engine(str(repo), ui, settings={}, session_key="t")
+    asyncio.run(e.turn("migrate everyone"))
+    assert not e.ok and not (repo / "half.py").exists()                 # unchecked work stays in the copy
+    assert (e.notes_dir / "worktree.json").exists() and e.project_root == str(repo)
+    other.release()
+    asyncio.run(e.turn("carry on"))
+    assert seen[1] == seen[0]                                            # back in the same copy
+    review = [c for c in calls if c[0] == "review"][0][4]
+    assert "half = 1" in review and "rest = 2" in review
+    assert e.ok and (repo / "half.py").exists() and (repo / "rest.py").exists()
+    assert not (e.notes_dir / "worktree.json").exists()
+
+
+def test_planning_and_answers_dont_wait_for_another_job(job, copies):
+    repo, calls, answers = job
+    other = _hold_folder(repo)
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    e._job = {"id": "j1"}
+    asyncio.run(asyncio.wait_for(e._choose_folder([{"answer_only": True}], engine.load_rules()), 2))
+    assert e._work_lock is None and e._home is None
+    other.release()
+
+
+def test_with_copies_off_a_second_job_waits_as_before(job, copies, monkeypatch):
+    repo, calls, answers = job
+    real = engine.load_rules
+
+    def rules(path=None, project_root=None, models_file=None):
+        r = real(path, project_root, models_file)
+        r["parallel"] = {"worktrees": False}
+        return r
+    monkeypatch.setattr(engine, "load_rules", rules)
+    other = _hold_folder(repo)
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+    e._job = {"id": "j1"}
+
+    async def go():
+        t = asyncio.ensure_future(e._choose_folder([{}], engine.load_rules()))
+        await asyncio.sleep(0.3)
+        assert not t.done()
+        other.release()
+        await asyncio.wait_for(t, 5)
+    asyncio.run(go())
+    assert e._work_lock is not None and e._home is None
+    e._work_lock.release()
+
+
+def test_a_copy_starts_from_the_folder_as_the_other_job_found_it(job, copies):
+    # Finished work nobody committed is in the copy; the other job's work in progress isn't.
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    (repo / "earlier.py").write_text("earlier = 1\n")
+    (repo / "a.py").write_text("x = 'earlier'\n")
+    other = _hold_folder(repo)
+    worktrees.record_base(str(repo), repo / ".claudex" / "work.json")
+    (repo / "inflight.py").write_text("inflight = 1\n")
+    seen = {}
+
+    async def work(child):
+        seen["files"] = sorted(p.name for p in pathlib.Path(child.cwd).glob("*.py"))
+        seen["a"] = pathlib.Path(child.cwd, "a.py").read_text()
+        pathlib.Path(child.cwd, "mine.py").write_text("mine = 1\n")
+        other.release()
+        return "end_turn", "done"
+    FakeChild.script = [work]
+    e, ui, stop = run(repo)
+    assert seen == {"files": ["a.py", "earlier.py"], "a": "x = 'earlier'\n"}
+    review = [c for c in calls if c[0] == "review"][0][4]
+    assert "mine = 1" in review and "earlier" not in review and "inflight" not in review
+    assert e.ok and "last commit" not in ui.all()
+    assert {p.name for p in repo.glob("*.py")} == {"a.py", "earlier.py", "inflight.py", "mine.py"}
+    assert (repo / "a.py").read_text() == "x = 'earlier'\n"
+
+
+def test_a_job_plans_while_another_has_the_folder_and_waits_only_to_change_files(job, copies, monkeypatch):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [step("codex")], "big_decisions": [], "concern_responses": []}
+    answers["review"] = {"verdict": "pass", "issues": [], "summary": "ok"}
+    real = engine.load_rules
+
+    def rules(path=None, project_root=None, models_file=None):
+        r = real(path, project_root, models_file)
+        r["parallel"] = {"worktrees": False}
+        return r
+    monkeypatch.setattr(engine, "load_rules", rules)
+    other = _hold_folder(repo)
+    FakeChild.script = [("b.py", "b = 1\n", "done")]
+    e = engine.Engine(str(repo), UI(), settings={}, session_key="t")
+
+    async def go():
+        t = asyncio.ensure_future(e.turn("do the thing"))
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            if any(c[0] == "plan" for c in calls):
+                break
+        assert any(c[0] == "plan" for c in calls) and not (repo / "b.py").exists()   # planned, not changing yet
+        other.release()
+        await asyncio.wait_for(t, 10)
+    asyncio.run(go())
+    assert e.ok and (repo / "b.py").exists() and not (repo / ".claudex" / "work.json").exists()
+
+
+def test_an_answer_isnt_blamed_for_another_jobs_edits(job, copies):
+    repo, calls, answers = job
+    answers["plan"] = {"steps": [dict(step("claude", "sonnet"), answer_only=True)], "big_decisions": [],
+                       "concern_responses": []}
+    other = _hold_folder(repo)
+
+    async def answer(child):
+        (repo / "a.py").write_text("x = 'the other job'\n")   # the other job, meanwhile
+        return "end_turn", "Here's the answer."
+    FakeChild.script = [answer]
+    e, ui, stop = run(repo)
+    other.release()
+    assert e.ok and "separate copy" not in ui.all()      # answered in the main folder, without waiting
+    assert not any(c[0] in ("review", "map") for c in calls)

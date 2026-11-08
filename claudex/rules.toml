@@ -10,6 +10,8 @@ model = "opus"
 effort = "high"
 replan_effort = "medium"   # revising a plan after a second opinion's concerns: the first plan did the
                            # hard thinking (high took about as long as the first plan, ~90 s, for one fix)
+replan_in_same_conversation = true   # Claude as lead re-plans in the conversation it planned in, sent only the
+                                     # concerns (no re-reading files); the conversation is deleted afterwards
 quick_followups = true    # a short reply ("carry on", "1", "A is fine", "???") goes straight back to the worker who
                           # did the last step, without planning again; false sends everything to the lead
 quick_followup_hours = 12 # only when that last step was this recent
@@ -59,6 +61,13 @@ step_idle_min = 20         # a worker that shows no sign of work for this long i
 step_idle_tool_min = 60    # ... allowed this long when one of its actions (a build, a test run) is still running
 fresh_worker_at = 0.7     # a worker whose conversation is this full starts the next step fresh (0 = never)
 usage_limit_wait_min = 30   # after an agent hits its usage limit, route around it for this long
+
+[parallel]
+# Several Claudex conversations can work in one project at once. Planning and answering never wait. When
+# another job is already changing files, this one works in a separate copy (a git worktree, made from the last
+# commit) and brings its changes back when it's done; if they clash, the copy is kept and the files named.
+worktrees = true
+dont_link = []     # ignored files and folders not to link into a copy (installed packages and .env files are)
 
 [ladder]
 # Where a worker steps up to when its work keeps failing review. Never Max.

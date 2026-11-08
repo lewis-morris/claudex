@@ -20,6 +20,8 @@ from .paths import tool_env
 # What the last call in this task used (tokens, cost), for the run trace. A contextvar, so a call's numbers
 # are only ever seen by the code that made it.
 LAST = contextvars.ContextVar("claudex_headless_last", default=None)
+# The conversation id of the last Claude call made with keep=True, so a follow-up call can carry it on.
+SESSION = contextvars.ContextVar("claudex_headless_session", default=None)
 
 
 class HeadlessError(Exception):
@@ -62,10 +64,12 @@ LEAN_SYSTEM = ("You answer the user's message directly, in the JSON shape you ar
                "You have no tools; judge only from the message.")
 
 
-def claude_cmd(model, effort, schema, tools="", budget=3.0):
+def claude_cmd(model, effort, schema, tools="", budget=3.0, keep=False, resume=None):
+    """keep=True saves the conversation so `resume` (its id) can carry it on; otherwise nothing is saved."""
     return ["claude", "-p", "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
             "--setting-sources", "project", "--settings", '{"disableAllHooks": true}',
-            "--disable-slash-commands", "--no-session-persistence", "--permission-mode", "dontAsk",
+            "--disable-slash-commands", *([] if keep or resume else ["--no-session-persistence"]),
+            *(["--resume", resume] if resume else []), "--permission-mode", "dontAsk",
             "--tools", tools, *(["--allowedTools", tools] if tools else ["--system-prompt", LEAN_SYSTEM]),
             "--model", model, "--effort", effort, "--max-budget-usd", str(budget),
             "--output-format", "json", "--json-schema", json.dumps(schema)]
@@ -77,14 +81,17 @@ def codex_cmd(model, effort, schema_path, out_path, cwd):
             "--output-schema", schema_path, "-o", out_path, "-C", cwd, "-"]
 
 
-async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_files=True, budget=3.0, role=None):
+async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_files=True, budget=3.0, role=None,
+                      keep=False, resume=None):
     tools = "Read,Grep,Glob" if read_files else ""
     started = time.time()
-    code, out, err = await _run(claude_cmd(model, effort, schema, tools, budget), cwd, prompt, timeout)
+    code, out, err = await _run(claude_cmd(model, effort, schema, tools, budget, keep, resume), cwd, prompt, timeout)
     try:
         data = json.loads(out)
     except Exception:
         raise HeadlessError(f"claude exited {code}: {(err or out)[-600:]}")
+    if keep or resume:
+        SESSION.set(data.get("session_id"))
     u = data.get("usage") or {}
     used = dict(fresh=(u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
                 cached=u.get("cache_read_input_tokens") or 0, output=u.get("output_tokens") or 0,
@@ -121,12 +128,30 @@ async def codex_json(cwd, prompt, schema, model, effort, timeout=900, role=None)
             raise HeadlessError(f"codex gave no answer: {(err or out)[-800:]}")
 
 
-async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None):
+async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None, keep=False,
+              resume=None):
+    """keep / resume: Claude only (Codex calls are always one-off)."""
     LAST.set(None)
+    SESSION.set(None)
     schema = strict(schema)
     if agent == "codex":
         return await codex_json(cwd, prompt, schema, model, effort, timeout, role=role)
+    if keep or resume:
+        return await claude_json(cwd, prompt, schema, model, effort, timeout, read_files, role=role, keep=keep,
+                                 resume=resume)
     return await claude_json(cwd, prompt, schema, model, effort, timeout, read_files, role=role)
+
+
+def forget(session_id):
+    """Delete a kept conversation once it's done with, so it doesn't fill your Claude Code /resume list."""
+    if not session_id or "/" in session_id:
+        return
+    try:
+        import pathlib
+        for f in (pathlib.Path.home() / ".claude" / "projects").glob(f"*/{session_id}.jsonl"):
+            f.unlink()
+    except Exception:
+        pass
 
 
 def strict(schema):

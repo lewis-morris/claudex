@@ -18,6 +18,7 @@ from . import fun, gitsnap, headless, permissions, usage, project_settings, trac
 from .child import Child
 from .ladder import next_rung
 from .locks import CHROME_LOCK, Lock
+from . import worktrees
 
 HOME = pathlib.Path(__file__).resolve().parent.parent
 from .paths import rules_file
@@ -364,6 +365,10 @@ class Engine:
         self.lead_model, self.lead_effort = s.get("lead_model"), s.get("lead_effort")
         self.children = {}
         self.active = None
+        self._work_lock = None    # held while this job changes files in the main folder
+        self._wt = None           # the separate copy this conversation's work is in, while another job has the folder
+        self._home = None         # (cwd, project_root, workers) of the main folder, while working in a copy
+        self._plan_session = None  # (agent, id) of the lead's kept planning conversation, for a re-plan
         self._carried = None      # the stopped step whose unchecked work this step's check also covers
         self.steers = []          # messages you sent mid-job that no worker has been given yet
         self.cancelled = False
@@ -505,7 +510,7 @@ class Engine:
                     text = (text[:INSTRUCTIONS_LIMIT] + f"\n[… {f} continues. Read the whole file before you start; "
                             "its rules all apply.]")
                 parts.append(f"--- {f} ---\n{text}")
-        saved = project_settings.load(self.project_root)
+        saved = project_settings.load(self.root.parent)   # the main folder, even from a copy
         for key, title in (("description", "PROJECT BRIEF"), ("base_prompt", "PROJECT BASE PROMPT")):
             if saved.get(key):
                 parts.append(f"--- {title} ---\n{saved[key]}")
@@ -666,7 +671,7 @@ class Engine:
             return c
         c = Child(name, rules["agents"][name], self.cwd, self.ui, self.mcp_servers)
         c.decide = lambda params, agent=base(name): self.decide_permission(agent, params)
-        resume_id = self._worker_ids().get(name)
+        resume_id = None if self._home else self._worker_ids().get(name)   # a copy's workers start fresh there
         try:
             await asyncio.wait_for(c.start(resume_id), START_TIMEOUT)
         except BaseException:
@@ -675,7 +680,8 @@ class Engine:
         if resume_id and c.resumed:
             await self.ui.say(f"_{base(name).title()} picked its earlier conversation back up._\n\n")
         self.children[name] = c
-        self._save_worker_id(name, c.session_id)
+        if not self._home:
+            self._save_worker_id(name, c.session_id)
         return c
 
     async def _fresh_if_full(self, name, c, rules):
@@ -729,6 +735,9 @@ class Engine:
     async def close(self):
         for c in self.children.values():
             await c.close()
+        for c in ((self._wt or {}).get("children") or {}).values():
+            if c not in self.children.values():
+                await c.close()
 
     def _clear_our_cancel(self):
         """A stop we asked for is handled here; don't let it leak out as the whole task being cancelled."""
@@ -751,7 +760,7 @@ class Engine:
     # ---------- permissions ----------
     async def decide_permission(self, agent, params):
         """A worker wants to do something. Claudex's rules, then the gatekeeper, then you (or "no" if you're away)."""
-        rules = self._rules or load_rules(self.rules_path, self.project_root, self.models_file)
+        rules = self._rules or load_rules(self.rules_path, self.root.parent, self.models_file)
         tc = params.get("toolCall") or {}
         opts = params.get("options") or []
         kind, command, paths, title = permissions.describe(tc, self.project_root)
@@ -864,6 +873,7 @@ class Engine:
             path = self._unchecked_path()
             if not path.exists():
                 path.write_text(json.dumps({"before": before, "title": title or "an earlier step",
+                                            "where": str(self.project_root),
                                             "at": datetime.datetime.now().isoformat(timespec="seconds")}))
         except Exception:
             pass
@@ -877,6 +887,8 @@ class Engine:
             return None
         if not (self.reviews_on and rules.get("review", {}).get("enabled", True)):
             return None
+        if kept.get("where") and kept["where"] != str(self.project_root):
+            return None       # it's in the other folder (the main one, or a copy): checked when work goes back there
         now = gitsnap.snapshot(self.project_root)
         try:
             if not now or not gitsnap.changed_files(self.project_root, kept["before"], now):
@@ -916,13 +928,16 @@ class Engine:
         since a long build or test run is quiet) is stuck, and WorkerIdle stops it."""
         task = asyncio.ensure_future(awaitable)
         started = self._work_clock()
+        began = time.monotonic()
         try:
             while True:
                 remaining = budget - (self._work_clock() - started)
                 if remaining <= 0:
                     raise asyncio.TimeoutError
                 if worker is not None and idle and self._human_since is None:
-                    quiet = worker.quiet_for() if hasattr(worker, "quiet_for") else 0
+                    # Never quieter than this step is old: a worker kept from an earlier job last spoke then,
+                    # and its new turn may not have started yet.
+                    quiet = min(worker.quiet_for() if hasattr(worker, "quiet_for") else 0, time.monotonic() - began)
                     limit = idle_tool if (idle_tool and getattr(worker, "open_cards", None)) else idle
                     if quiet >= limit:
                         raise WorkerIdle(limit)
@@ -982,10 +997,14 @@ class Engine:
             except Exception:
                 pass
 
-    async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True, role=None):
+    async def _ask(self, agent, model, effort, prompt, schema, rules, timeout, read_files=True, role=None,
+                   keep=False, resume=None):
         """A read-only call to one agent. If it's at its usage limit, the other agent's strongest checker
         answers instead. `prompt` may be a function of the agent that answers. Returns (agent, model, effort,
-        answer). Other errors are raised as they are."""
+        answer). Other errors are raised as they are.
+
+        keep=True saves a Claude call's conversation (its id is then in headless.SESSION); resume=(agent, id,
+        short prompt) carries that conversation on with the short prompt, when that agent is the one answering."""
         alt = other(agent)
         fb = rules["reviewers"][alt]
         if role == "gatekeeper":      # a yes/no on one action: the other side's light model, not its strongest
@@ -996,11 +1015,18 @@ class Engine:
                 continue
             try:
                 m = project_settings.allowed_model(rules, a, m)
-                text = prompt(a) if callable(prompt) else prompt   # built for whoever actually answers
+                carry = resume if resume and resume[0] == a else None
+                text = carry[2] if carry else prompt(a) if callable(prompt) else prompt   # for whoever answers
+                extra = {}
+                if a == "claude" and carry:
+                    extra["resume"] = carry[1]
+                elif a == "claude" and keep:
+                    extra["keep"] = True
                 began = time.monotonic()
                 try:
                     async with self._busy(role, a, m):
-                        answer = await headless.ask(a, self.cwd, text, schema, m, e, timeout, read_files, role=role)
+                        answer = await headless.ask(a, self.cwd, text, schema, m, e, timeout, read_files, role=role,
+                                                    **extra)
                 except asyncio.CancelledError:      # stopped, by you or by the host: still worth a line in the trace
                     self._trace(ev="call", role=role, asked=agent, agent=a, model=m, effort=e, ok=False,
                                 prompt_chars=len(text), secs=round(time.monotonic() - began, 1), error="cancelled")
@@ -1012,6 +1038,7 @@ class Engine:
                     raise
                 self._trace(ev="call", role=role, asked=agent, agent=a, model=m, effort=e, ok=True,
                             prompt_chars=len(text), secs=round(time.monotonic() - began, 1),
+                            **({"resumed": True} if extra.get("resume") else {}),
                             verdict=(answer or {}).get("verdict") or (answer or {}).get("decision"),
                             **(headless.LAST.get() or {}))
                 return a, m, e, answer
@@ -1053,6 +1080,10 @@ class Engine:
                 "on finished work (data, then logic, then screens). When parts connect, write the exact contract "
                 "(endpoint, fields, function names) into BOTH steps' instructions. Each worker tests its own work and "
                 "the other agent reviews it, so don't add separate testing or review steps.\n"
+                "The exception is a very big job (a migration, a rebuild across much of the project, anything likely "
+                "to take a worker well over half an hour): split it into stages, each one leaving the project "
+                "working and small enough to check on its own, so a problem is caught after its stage rather than "
+                "at the end. Each stage still goes to the best agent for it (the same one is fine).\n"
                 "List in big_decisions ONLY choices that are hard to undo: database schema, a new dependency, "
                 "sign-in/permissions, money or VAT logic, a contract between parts, deleting data, architecture. "
                 "Usually there are none. Set browser=true only when the step must use the user's signed-in Chrome.\n"
@@ -1085,9 +1116,38 @@ class Engine:
         if critique and not self.lead_effort:   # revising its own plan: the hard thinking is done
             effort = rules["lead"].get("replan_effort") or effort
         timeout = rules.get("limits", {}).get("plan_timeout_min", 10) * 60
-        a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout, role="lead")
+        lead = rules.get("lead", {})
+        if critique and self._plan_session and lead.get("replan_in_same_conversation", True):
+            # The lead carries on the conversation it planned in: it has read the files and knows its plan, so
+            # it's sent only the concerns instead of the whole brief again (and doesn't re-read anything).
+            short = ("A SECOND OPINION on the plan you just wrote raised these concerns. Revise the plan where they "
+                     "are right, and answer EVERY concern in concern_responses (accepted true/false and why). "
+                     "Return the whole revised plan in the same shape, every step's instructions in full.\n"
+                     + json.dumps({k: v for k, v in critique.items() if k != "earlier_plan"}, indent=1))
+            try:
+                a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout,
+                                                  role="lead", resume=(*self._plan_session, short))
+                self._planned_by = a
+                return answer
+            except headless.HeadlessError as e:
+                if getattr(e, "limit", False):
+                    raise
+                self._trace(ev="replan_fresh", error=str(e)[:200])   # the kept conversation couldn't be resumed
+            finally:
+                self._forget_plan_session()
+        keep = not critique and self.second_on and lead.get("replan_in_same_conversation", True)
+        a, _, _, answer = await self._ask(agent, model, effort, prompt, PLAN_SCHEMA, rules, timeout, role="lead",
+                                          keep=keep)
         self._planned_by = a
+        self._forget_plan_session()
+        if keep and a == "claude" and headless.SESSION.get():
+            self._plan_session = (a, headless.SESSION.get())
         return answer
+
+    def _forget_plan_session(self):
+        if self._plan_session:
+            headless.forget(self._plan_session[1])
+        self._plan_session = None
 
     def _single(self, text, agent, rules, why):
         d = rules["agent_defaults"][agent]
@@ -1124,13 +1184,7 @@ class Engine:
         self._prepare_memory()
         if not self.dry_run:
             usage.remember_project(self.project_root)   # so `claudex usage` can show who did what, and why
-        work_lock = None if self.dry_run else Lock(self.root / "work.lock")
         try:
-            if work_lock:
-                if not work_lock.try_acquire():      # only show the wait when there really is one
-                    async with self._busy("wait"):
-                        await work_lock.acquire(lambda: self.ui.say(
-                            "_Another Claudex job is working in this project; waiting for it to finish…_\n\n"))
             now = datetime.datetime.now()
             self._job = {"at": now.strftime("%Y-%m-%d %H:%M"), "request": text, "rows": [], "gate": {},
                          "id": now.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6],
@@ -1143,6 +1197,8 @@ class Engine:
                 waited_for_you=round(self._human_elapsed - waited_before, 1), **more)
             try:
                 stop = await self._turn(text, rules, already_said)
+                if self._home and self.ok and stop == "end_turn":
+                    await self._bring_back(rules)
             except asyncio.CancelledError:
                 ended("cancelled")
                 raise
@@ -1170,8 +1226,8 @@ class Engine:
             self._job = None
             self._clear_our_cancel()
             self._task = None
-            if work_lock:
-                work_lock.release()
+            self._leave_copy()
+            self._release_folder()
 
     async def _turn(self, text, rules, already_said=False):
         forced = self.route if self.route != "auto" else None
@@ -1220,13 +1276,17 @@ class Engine:
             return "cancelled"
 
         if plan.get("big_decisions") and self.second_on and not forced:
-            plan = await self._check_decisions(text, plan, rules)
+            try:
+                plan = await self._check_decisions(text, plan, rules)
+            finally:
+                self._forget_plan_session()
             if plan is None:
                 self.ok = False
                 return "end_turn"
             if self.cancelled:
                 return "cancelled"
 
+        self._forget_plan_session()       # no second opinion needed it
         steps = plan["steps"]
         for s in steps:  # a step needing the signed-in browser must go to an agent that has it
             if s["browser"] and s["agent"] not in rules["browser"]["signed_in"]:
@@ -1246,6 +1306,7 @@ class Engine:
             await self.ui.say("_(Dry run: nothing was changed.)_\n")
             return "end_turn"
 
+        await self._choose_folder(steps, rules)
         turn_start = gitsnap.snapshot(self.project_root)
         if turn_start is None and self.reviews_on:
             self.ok = False
@@ -1465,7 +1526,163 @@ class Engine:
             f"{memory}\n\n"
             f"The user's original message:\n{text}\n\n"
             f"Step {i} of {n}: {s['title']}\n\n{s['instructions']}\n\n"
-            + shapes)
+            + self._copy_note() + shapes)
+
+    # ---------- a separate copy, while another job has the folder ----------
+    def _copy_file(self):
+        return self.notes_dir / "worktree.json"
+
+    def _copy_note(self):
+        if not self._home:
+            return ""
+        return (f"WHERE YOU WORK: another Claudex job is changing files in the main project folder "
+                f"({self._home[1]}), so this job works in a separate copy of it: {self.project_root}. Make every "
+                "change in this copy, never in the main folder. Don't commit, push or deploy from the copy: Claudex "
+                "brings these changes back into the main folder when the job is done. If the job needs a commit, "
+                "push or deploy, say so in your reply.\n\n")
+
+    async def _choose_folder(self, steps, rules):
+        """Where this job's steps run. In the main folder when no other job is changing files there (it then
+        holds the work lock until the job ends); in a separate copy when one is; and still in the main folder,
+        without the lock, when every step only answers. Work a stopped job left in a copy carries on there."""
+        if self.dry_run or self._home:
+            return
+        if self._wt is None:
+            try:
+                kept = json.loads(self._copy_file().read_text())
+                if pathlib.Path(kept["path"]).is_dir():
+                    self._wt = kept
+                else:
+                    self._copy_file().unlink()
+            except Exception:
+                pass
+        if self._wt is not None:
+            self._enter_copy()
+            await self.ui.say("_Carrying on in this conversation's separate copy of the project._\n\n")
+            return
+        if all(s.get("answer_only") for s in steps):
+            return
+        lock = Lock(self.root / "work.lock")
+        if lock.try_acquire():
+            await self._took_folder(lock)
+            return
+        par = rules.get("parallel", {})
+        stopped_here = False
+        try:
+            stopped_here = json.loads(self._unchecked_path().read_text()).get("where") == str(self.project_root)
+        except Exception:
+            pass
+        if par.get("worktrees", True) and not stopped_here and worktrees.can_use(self.project_root):
+            try:
+                wt = await asyncio.to_thread(worktrees.create, self.project_root, self._job["id"],
+                                             par.get("dont_link", []), self.root / "work.json")
+            except Exception as e:
+                self._trace(ev="error", where="copy", error=str(e)[:300])
+                await self.ui.say(f"_(Couldn't make a separate copy of the project: {e}.)_\n\n")
+            else:
+                self._wt = wt
+                self._copy_file().write_text(json.dumps(wt))
+                self._trace(ev="copy_made", path=wt["path"], linked=len(wt.get("linked", [])))
+                self._enter_copy()
+                await self.ui.say("_Another Claudex job is changing files in this project, so this one works in a "
+                                  "separate copy and brings its changes back when it's done._\n\n"
+                                  + ("_(The other job didn't say how it found the folder, as it runs an older "
+                                     "Claudex, so the copy starts from the last commit: work since then that "
+                                     "nobody committed isn't in it.)_\n\n" if wt.get("from_commit") else ""))
+                return
+        async with self._busy("wait"):
+            await lock.acquire(lambda: self.ui.say(
+                "_Another Claudex job is changing files in this project; waiting for it to finish…_\n\n"))
+        await self._took_folder(lock)
+
+    async def _took_folder(self, lock):
+        """This job changes the main folder: record how it found it, so a copy made meanwhile starts from there."""
+        self._work_lock = lock
+        if worktrees.can_use(self.project_root):
+            try:
+                await asyncio.to_thread(worktrees.record_base, self.project_root, self.root / "work.json")
+            except Exception as e:
+                self._trace(ev="error", where="record_base", error=str(e)[:300])
+
+    def _release_folder(self):
+        if self._work_lock:
+            try:
+                (self.root / "work.json").unlink()
+            except Exception:
+                pass
+            self._work_lock.release()
+            self._work_lock = None
+
+    def _enter_copy(self):
+        self._home = (self.cwd, self.project_root, self.children)
+        self.cwd = self.project_root = self._wt["path"]
+        self.children = self._wt.setdefault("children", {})
+
+    def _leave_copy(self):
+        if not self._home:
+            return
+        self.cwd, self.project_root, self.children = self._home
+        self._home = None
+
+    async def _bring_back(self, rules):
+        """Bring a finished job's changes from its copy into the main folder, then remove the copy. Waits for
+        any job changing files in the main folder, so they never land in the middle of its check."""
+        if self._unchecked_path().exists():
+            return             # a stopped step's work there hasn't been checked yet: it stays in the copy
+        wt, home = self._wt, self._home[1]
+        lock = Lock(self.root / "work.lock")
+        try:
+            if not lock.try_acquire():
+                async with self._busy("wait"):
+                    await lock.acquire(lambda: self.ui.say(
+                        "_Bringing this job's changes back once the other Claudex job has finished changing files…_\n\n"))
+            brought, clashes, said = await asyncio.to_thread(worktrees.bring_back, home, wt)
+        except Exception as e:
+            brought, clashes, said = [], [], str(e)
+        finally:
+            lock.release()
+        self._trace(ev="copy_back", files=len(brought), clashes=clashes[:20], said=said[:300])
+        if clashes or (said and not brought and said != "nothing to bring back"):
+            self.ok = False
+            names = ", ".join(f"`{f}`" for f in clashes[:8]) or "some files"
+            await self.ui.say(f"\n\n**Couldn't bring this job's changes back:** {names} changed in the main folder "
+                              f"since, in the same places. The work is kept in `{wt['path']}` on branch "
+                              f"`{wt['branch']}`. Ask for it to be merged in, and the clash sorted out, when the "
+                              "other job is done.\n")
+            await self._forget_copy(remove=False)
+            return
+        if brought:
+            await self.ui.say(f"\n\n_Brought this job's changes back into the project ({len(brought)} "
+                              f"file{'s' if len(brought) != 1 else ''}; {said})._\n")
+        await self._forget_copy(remove=True)
+
+    async def _forget_copy(self, remove):
+        """Done with the copy: stop its workers, and forget saved conversations of the same agents in the main
+        folder, since they don't know this work (a fresh worker gets it from the memory)."""
+        wt, home = self._wt, self._home
+        agents = list((wt or {}).get("children", {}))
+        for c in list((wt or {}).get("children", {}).values()):
+            await c.close()
+        main_children = home[2] if home else {}
+        for name in agents:
+            old = main_children.pop(name, None)
+            if old:
+                await old.close()
+            self._forget_worker_id(name)
+        if remove and wt:
+            try:
+                worktrees.remove(home[1] if home else self.project_root, wt)
+            except Exception:
+                pass
+        try:
+            self._copy_file().unlink()
+        except Exception:
+            pass
+        if wt is not None:
+            wt["children"] = {}
+        self._wt = None
+        if home:
+            self._home = (home[0], home[1], main_children)
 
     async def _configure(self, c, s, rules, model, effort):
         agent = base(c.name)
@@ -1630,6 +1847,14 @@ class Engine:
                 if outside:
                     self._step_extra["outside"] = outside[:20]
                     await self._warn_outside(outside)
+                if files and not self._home and self._work_lock is None and not self.dry_run:
+                    # Answering without the folder: what changed may be another job's work in progress.
+                    mine = sorted(str(t) for t in (getattr(c, "touched", None) or []))
+                    self._log(**row, verdict="not_reviewed" if mine else "no_changes", files=mine[:20])
+                    if mine:
+                        await self.ui.say(f"\n\n_This answer changed {len(mine)} file(s) while answering, which "
+                                          "weren't checked: " + ", ".join(f"`{m}`" for m in mine[:5]) + "._\n")
+                    return False
                 if not files:
                     self._log(**row, verdict="outside_project" if outside else "no_changes")
                     return False

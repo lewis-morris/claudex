@@ -28,9 +28,11 @@ Claude is great at front ends and pictures-on-screens work. Codex is great at su
 need both, and the best results come when someone *else* checks the work. Claudex is that team:
 
 - **One lead plans.** It reads the codebase and splits your request into the fewest parts, picking agent,
-  model and reasoning level for each from a rules table you control.
+  model and reasoning level for each from a rules table you control. A very big job (a migration, a rebuild)
+  is split into stages that each leave the project working, so each is checked as it's done.
 - **Big decisions get a second opinion** from the other side *before* any work starts: database schemas,
-  money logic, new dependencies, contracts between parts. The lead answers every concern in writing.
+  money logic, new dependencies, contracts between parts. The lead answers every concern in writing,
+  revising its plan in the same conversation it planned in (so it isn't sent everything again).
 - **Workers take turns**: one part at a time, each in its own real Claude Code or Codex session.
 - **Every change is reviewed by the other agent** (with reviews on, the default). Problems go back to the same worker; if they keep failing,
   it steps up to a stronger model; then it stops and tells you what's still wrong. (If the other agent is at
@@ -431,6 +433,17 @@ when it's stuck: nothing at all for 20 minutes (60 if one of its actions, such a
 still going), or still busy after 3 hours as a last backstop (`[limits]` in the rules). A stopped worker's
 conversation is kept: say "carry on" and it picks up where it stopped, and the check after that step covers
 what it changed before it was stopped too.
+
+**Several conversations in one project.** You can run as many Claudex conversations in a project as you like.
+Planning and answering questions never wait for each other. When one job is already changing files, the next
+works in a separate copy of the project (a git worktree made from the last commit, in
+`~/.cache/claudex/worktrees`, with installed packages and `.env` files linked in) and brings its changes back
+when it's done: the worker's own commits are merged, and anything uncommitted arrives uncommitted, as if it had
+worked in place. It brings them back once the other job has finished changing files, so they never land in the
+middle of that job's check. If the two jobs changed the same lines, the main folder is left alone and the copy
+is kept on its branch (`claudex/<job>`), with the clashing files named. A job stopped in its copy carries on
+there. Workers in a copy are told not to push or deploy from it. Turn copies off with `[parallel] worktrees =
+false` (jobs then wait their turn); `[parallel] dont_link` lists ignored files not to link in.
 
 New sessions always run the Claudex you have now. A session that was already open when Claudex changed says
 so before its next job, and `claudex doctor` lists any such sessions with the command to restart each
