@@ -72,17 +72,28 @@ def load_session_meta(sid):
 class SessionUI:
     def __init__(self, peer, session_id):
         self.peer, self.session_id = peer, session_id
-        self.activity = PromptActivity(self.update)
+        self.keepalive = PromptActivity(self.update)
 
     async def update(self, upd):
         self.peer.notify("session/update", {"sessionId": self.session_id, "update": upd})
-        self.activity.touch()
+        self.keepalive.touch()
 
     async def say(self, text):
         await self.update({"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": text}})
 
     async def plan(self, entries):
         await self.update({"sessionUpdate": "plan", "entries": entries})
+
+    async def working(self, title):
+        """A running-work card, so Agents of Empires sees progress while a plan or check is thinking."""
+        tid = "claudex-" + uuid.uuid4().hex[:12]
+        await self.update({"sessionUpdate": "tool_call", "toolCallId": tid, "title": title, "kind": "think",
+                           "status": "in_progress"})
+        return tid
+
+    async def done_working(self, tid, ok=True):
+        await self.update({"sessionUpdate": "tool_call_update", "toolCallId": tid,
+                           "status": "completed" if ok else "failed"})
 
     async def permission(self, params):
         return await self.peer.request("session/request_permission", {**params, "sessionId": self.session_id})
@@ -105,7 +116,9 @@ class Server:
                                                                  "embeddedContext": True},
                                           "mcpCapabilities": {"http": True, "sse": False}},
                     "authMethods": [],
-                    "agentInfo": {"name": "claudex", "title": "Claudex", "version": __version__}}
+                    "agentInfo": {"name": "claudex", "title": "Claudex", "version": __version__},
+                    # Messages sent mid-job come in as `_session/steering` instead of being turned away.
+                    "_meta": {"steering": {"supported": True}}}
         if method in ("session/new", "session/load"):
             # session/load: Agents of Empires restarting a session it already knows (it keeps the conversation
             # itself). Claudex picks the same session back up: same memory and notes, same pickers.
@@ -180,7 +193,7 @@ class Server:
                 raise RpcError(-32000, "Claudex is still working on the last message")
             e.busy = True
             try:
-                await e.ui.activity.start()
+                await e.ui.keepalive.start()
                 if typed.startswith("/") and self.local_command(typed):
                     e.local = asyncio.ensure_future(self.slash(e, typed))
                     try:
@@ -194,10 +207,28 @@ class Server:
                 if skill:
                     typed = (f"@{skill[1]} " if skill[1] else "") + skill[0]
                 text = (typed + ("\n" + extra if extra else "")).strip()
-                return {"stopReason": await e.turn(text)}
+                stop = await e.turn(text)
+                while stop == "end_turn" and getattr(e, "steers", None):     # added mid-job, but the job ended before any worker took it
+                    more, e.steers = "\n\n".join(e.steers), []
+                    await e.ui.say("\n\n---\n_Now for what you added while that was running._\n\n")
+                    stop = await e.turn(more, already_said=True)
+                e.steers = []
+                return {"stopReason": stop}
             finally:
-                await e.ui.activity.stop()
+                await e.ui.keepalive.stop()
                 e.busy = False
+        if method == "_session/steering":
+            e = self.sessions.get(p.get("sessionId"))
+            if not e:
+                raise RpcError(-32602, "unknown session")
+            text = "\n".join(b.get("text", "") for b in p.get("prompt") or [] if b.get("type") == "text").strip()
+            outcome = await e.steer(text) if e.busy and not getattr(e, "local", None) else "idle"
+            if outcome != "idle":
+                return {"outcome": "injected"}       # a worker has it, or the next one will
+            if ((p.get("_meta") or {}).get("steering") or {}).get("idleBehavior") == "promptRequired":
+                return {"outcome": "promptRequired", "reason": "noRunningTurn"}
+            asyncio.ensure_future(self.on_request("session/prompt", {k: v for k, v in p.items() if k != "_meta"}))
+            return {"outcome": "startedNewTurn"}
         raise RpcError(-32601, f"method not found: {method}")
 
     LOCAL = ("rules", "doctor", "log", "memory", "status", "help", "shared", "permissions", "init", "usage", "models")
@@ -255,7 +286,7 @@ class Server:
         if method == "session/cancel":
             e = self.sessions.get(p.get("sessionId"))
             if e:
-                await e.ui.activity.stop()
+                await e.ui.keepalive.stop()
             if e and getattr(e, "local", None):
                 e.local.cancel()
             elif e:
@@ -278,5 +309,5 @@ async def serve(settings=None):
         await srv.peer.run()
     finally:
         for e in srv.sessions.values():
-            await e.ui.activity.stop()
+            await e.ui.keepalive.stop()
             await e.close()

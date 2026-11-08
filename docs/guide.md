@@ -147,8 +147,8 @@ Workers ask before they act. Who answers depends on the mode (`--mode`, or `/mod
 | Mode | Who answers |
 |---|---|
 | `ask` | you, every time |
-| `auto` (default) | Claudex's rules: **deny** first, then **ask** (you), then **allow**. Anything the rules don't cover goes to the **gatekeeper** (a quick model), which allows, refuses, or hands it to you. If nobody's watching (a script, the benchmark), anything that would ask you is refused |
-| `unrestricted` | nobody: the agents never ask. A red **UNRESTRICTED** tag stays on screen |
+| `auto` | Claudex's rules: **deny** first, then **ask** (you), then **allow**. Anything the rules don't cover goes to the **gatekeeper** (a quick model), which allows, refuses, or hands it to you. If nobody's watching (a script, the benchmark), anything that would ask you is refused |
+| `unrestricted` (default) | nobody: the agents never ask. A red **UNRESTRICTED** tag stays on screen |
 
 `claudex permissions` shows the rules and every recent decision, with who made it:
 
@@ -191,7 +191,10 @@ and recent jobs. `--files` lists every file.
 | `permissions.jsonl` | every permission decision |
 | `models.md`, `rules.toml` | this project's own who-does-what and rules |
 
-Everyone (the lead, the second opinion, both workers, both checkers, the final check) gets the same memory.
+Everyone (the lead, the second opinion, both workers, both checkers, the final check) works from the same
+memory, but each gets only the part it needs: checkers don't get the journal of old jobs, and a worker isn't
+sent again what it already has in its conversation. The map is refreshed only when files were added, deleted
+or renamed, or the build or run setup changed.
 
 ## 8. Usage
 
@@ -285,3 +288,50 @@ to restart it (`aoe acp stop <id>`: it comes straight back on your next message)
 | one agent hit its usage limit | nothing to do: the other one takes over, and Claudex says when the limit resets |
 | the chat says another job is running here | only one Claudex job works in a project at a time; it waits its turn |
 | the monkeys look odd | your terminal needs 24-bit colour (most do); try F4, or `/anim off` |
+
+## Project setup and text selection
+
+On first open, the terminal offers a three-page setup dialog. `/setup` opens it again. Save stores
+permissions, work routing, checks, enabled models, the project brief and the base prompt in
+`.claudex/settings.json`. Existing instruction files are preserved; the optional checkbox creates
+only missing AGENTS.md and CLAUDE.md files. Later saves nothing; Skip setup remembers the dismissal.
+
+Type `mode` or `/mode` for the saved project permission picker. Explicit launch flags take precedence
+over saved choices. Setup opens when no job is running. Changing mode during a job saves it for the next job;
+it does not alter the active worker or answer an outstanding approval. Stop and retry to use it sooner.
+
+Drag to select conversation text normally. F6 switches mouse controls on for clickable web addresses
+and checkboxes, and switches back to text selection. `/links` opens a link picker. Menus and setup
+dialogs enable mouse clicks temporarily. Use your terminal's copy shortcut for selected text.
+
+## Multiline drafts, files and images
+
+The input grows as you type or paste. Enter sends; Alt+Enter or Ctrl+J adds a line. Pasting several
+lines does not send them. A draft submitted during another job is kept.
+
+Use `/attach "path with spaces"`, paste a local file path, or drop files from your file manager when
+your terminal supports that. F7/Ctrl+V reads copied images or files from the desktop clipboard
+(wl-paste on Wayland, xclip on X11). `/detach 1` removes an item from the draft. The attachment strip
+shows what will accompany the next message. Up to 10 files, 20 MB each.
+
+Claudex keeps stable copies in `.claudex/attachments` for agents to inspect, including image-viewing
+instructions for pictures. Originals are untouched. Copies remain for retries and history; there
+is no inline image preview, and files are not sent until you submit the message.
+
+## Copying during live output
+
+Press F8 or type `/copy` to open a frozen, full-width copy of the conversation. Drag to select: letting
+go copies it to your clipboard, and the top line says "Copied …". Shift+arrows and Ctrl+A select by
+keyboard; Enter, Y or Ctrl+C copies. Esc clears the selection, then returns to live output. Agents keep
+working and your draft is kept. `/copy last` copies the newest reply straight away.
+
+The mouse wheel and PgUp/PgDn scroll the conversation in either mouse mode. While you read back, new
+output doesn't move the view; Ctrl+End jumps back to the newest line.
+
+## Seeing how a job ran
+
+`claudex trace` shows the last few jobs in this project: how long each role took, how big its prompts
+were, tokens and cost, every step's verdict and how full the worker's context got, and who answered each
+permission. It ends with pointers to what looks worth improving (many review rounds, a busy gatekeeper,
+diffs too big to review whole, a role taking most of the time). The raw trace is
+`.claudex/trace.jsonl`; it records sizes and names, never file contents.

@@ -28,7 +28,9 @@ class SnapshotError(Exception):
 
 
 def _git(cwd, *args, env=None, timeout=60, stdin=None):
-    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=stdin is None or isinstance(stdin, str),
+    text_mode = stdin is None or isinstance(stdin, str)
+    return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=text_mode,
+                          **({"encoding": "utf-8", "errors": "surrogateescape"} if text_mode else {}),
                           env=env, timeout=timeout, input=stdin)
 
 
@@ -101,7 +103,7 @@ def snapshot(cwd):
         _sync_excludes(root, store)
         warm = store / "claudex-index"        # the last snapshot's index: its timestamps let git skip unchanged files
         if warm.exists():
-            shutil.copyfile(warm, tmp)
+            shutil.copy2(warm, tmp)   # keep its timestamp: git then re-reads files changed in the same second
     except Exception as e:
         LAST_ERROR = str(e)[:200]
         return None
@@ -144,7 +146,7 @@ def snapshot(cwd):
             return None
         LAST_ERROR = ""
         try:
-            shutil.copyfile(tmp, store / "claudex-index")
+            shutil.copy2(tmp, store / "claudex-index")
         except Exception:
             pass
         return out.stdout.strip()
@@ -169,15 +171,96 @@ def changed_files(cwd, before, after):
     return [l for l in out.stdout.splitlines() if l]
 
 
+def changed_status(cwd, before, after):
+    """[(status letter, path)] between two snapshots: A added, D deleted, M changed, R renamed (new path)."""
+    if not before or not after or before == after:
+        return []
+    out = _sg(str(pathlib.Path(cwd).resolve()), "diff", "--name-status", "-M", before, after)
+    if out.returncode != 0:
+        raise SnapshotError(f"git diff failed: {out.stderr.strip()[:200]}")
+    rows = []
+    for line in out.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            rows.append((parts[0], parts[-1]))
+    return rows
+
+
+# Changes a reviewer can't usefully read line by line: listed in the summary, but their patch is left out.
+NOISY_NAMES = {"package-lock.json", "yarn.lock", "pnpm-lock.yaml", "poetry.lock", "uv.lock", "cargo.lock",
+               "gemfile.lock", "composer.lock", "go.sum", "pipfile.lock", "bun.lockb", "npm-shrinkwrap.json"}
+NOISY_SUFFIXES = (".min.js", ".min.css", ".map", ".snap", ".lock")
+
+
+def _noisy(path):
+    name = pathlib.PurePosixPath(path).name.lower()
+    return name in NOISY_NAMES or name.endswith(NOISY_SUFFIXES)
+
+
+def _split_patch(text):
+    """The patch as [(path, text)], one per file, in git's order."""
+    chunks, cur = [], []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("diff --git ") and cur:
+            chunks.append("".join(cur))
+            cur = []
+        cur.append(line)
+    if cur:
+        chunks.append("".join(cur))
+    out = []
+    for c in chunks:
+        new = old = None
+        for line in c.splitlines()[:8]:
+            if line.startswith("+++ "):
+                new = line[4:]
+            elif line.startswith("--- "):
+                old = line[4:]
+        name = new if new and new != "/dev/null" else old
+        if name and name != "/dev/null":
+            name = name.rstrip("\t").strip('"')
+            path = name[2:] if name[:2] in ("a/", "b/") else name
+        else:                       # a binary or mode-only change: no ---/+++ lines
+            head = c.split("\n", 1)[0]
+            path = head.rsplit(" b/", 1)[-1]
+        out.append((path, c))
+    return out
+
+
 def diff(cwd, before, after, limit=60000):
-    """(diff text, list of files, truncated?) between two snapshots. Truncation is always reported."""
+    """(diff text, list of files, truncated?) between two snapshots. Truncation is always reported.
+
+    The text is git's summary of every file, then whole per-file patches that fit within `limit`: a file's
+    patch is never cut partway through. Lockfiles and generated files only appear in the summary; any other
+    file whose patch didn't fit is named, and `truncated` is True so the reviewer reads it directly."""
     files = changed_files(cwd, before, after)
     if not files:
         return "", [], False
-    res = _sg(str(pathlib.Path(cwd).resolve()), "diff", "--stat", "--patch", before, after, timeout=120)
-    if res.returncode != 0:
-        raise SnapshotError(f"git diff failed: {res.stderr.strip()[:200]}")
-    text = res.stdout
-    if len(text) <= limit:
-        return text, files, False
-    return text[:limit], files, True
+    root = str(pathlib.Path(cwd).resolve())
+    stat = _sg(root, "diff", "--stat=120", before, after, timeout=120)
+    res = _sg(root, "-c", "core.quotePath=false", "diff", "--patch", before, after, timeout=120)
+    if res.returncode != 0 or stat.returncode != 0:
+        raise SnapshotError(f"git diff failed: {(res.stderr or stat.stderr).strip()[:200]}")
+    # Preserve raw filenames internally, but make non-UTF-8 patch bytes readable to the reviewer.
+    readable = lambda x: x.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")  # noqa: E731
+    summary, patch = readable(stat.stdout), readable(res.stdout)
+    if len(summary) + len(patch) <= limit and not any(_noisy(f) for f in files):
+        return summary + patch, files, False
+    kept, noisy, left = [], [], []
+    room = limit - len(summary)
+    for path, chunk in _split_patch(patch):
+        if _noisy(path):
+            noisy.append(path)
+        elif len(chunk) <= room:
+            kept.append(chunk)
+            room -= len(chunk)
+        else:
+            left.append((path, chunk))
+    if not kept and left:          # nothing whole fits: give the start of the first file rather than nothing
+        path, chunk = left[0]
+        kept.append(chunk[:max(room, 0)] + "\n[… this file's patch is cut short …]\n")
+    notes = ""
+    if noisy:
+        notes += "Patch left out (lockfile or generated; changed as listed above): " + ", ".join(noisy) + "\n"
+    if left:
+        notes += "Patch left out for room; read these files directly: " + ", ".join(p for p, _ in left) + "\n"
+    return summary + notes + "".join(kept), files, bool(left)

@@ -326,6 +326,10 @@ def main(argv):
     d.add_argument("--models", metavar="FILE", help="check this models.md")
     r = sub.add_parser("rules", help="show who does what")
     r.add_argument("--edit", action="store_true")
+    tr = sub.add_parser("trace", help="how recent jobs ran: time, tokens and cost per role, and what to improve")
+    tr.add_argument("-n", type=int, default=5, help="how many recent jobs (default 5)")
+    tr.add_argument("--cwd", default=".")
+    tr.add_argument("--path", action="store_true", help="just print where the trace file is")
     lg = sub.add_parser("log", help="recent steps in this project")
     lg.add_argument("-n", type=int, default=20)
     lg.add_argument("--cwd", default=".")
@@ -377,6 +381,14 @@ def main(argv):
         return show_rules(a.edit)
     if a.cmd == "log":
         return show_log(a.cwd, a.n)
+    if a.cmd == "trace":
+        from . import trace
+        from .engine import repo_root
+        root = pathlib.Path(repo_root(a.cwd) or a.cwd) / ".claudex"
+        if a.path:
+            print(root / trace.NAME)
+            return 0
+        return trace.report(root, a.n)
     if a.cmd == "login":
         return login(a.agent, a.device, a.again)
     if a.cmd == "bench":

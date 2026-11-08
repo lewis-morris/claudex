@@ -59,8 +59,8 @@ def test_server_owns_timer_until_prompt_ends(ending):
         updates, started = [], asyncio.Event()
         ui = SessionUI(SimpleNamespace(notify=lambda method, params: updates.append(params['update'])), 's')
         clock = Clock()
-        ui.activity.clock = lambda: clock.now
-        ui.activity.sleep = clock.sleep
+        ui.keepalive.clock = lambda: clock.now
+        ui.keepalive.sleep = clock.sleep
 
         result = asyncio.get_running_loop().create_future()
 
@@ -74,7 +74,7 @@ def test_server_owns_timer_until_prompt_ends(ending):
         server.sessions['s'] = engine
         prompt = asyncio.create_task(server.on_request('session/prompt', {'sessionId': 's', 'prompt': []}))
         await started.wait()
-        timer = ui.activity.task
+        timer = ui.keepalive.task
         await clock.advance()
         if ending == 'cancel':
             engine.cancel = prompt.cancel
@@ -89,7 +89,7 @@ def test_server_owns_timer_until_prompt_ends(ending):
             else:
                 result.set_result(None)
                 assert await prompt == {'stopReason': None}
-        assert timer.done() and ui.activity.task is None and not engine.busy
+        assert timer.done() and ui.keepalive.task is None and not engine.busy
         count = len(updates)
         await asyncio.sleep(0)
         assert len(updates) == count

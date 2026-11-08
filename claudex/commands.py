@@ -13,7 +13,13 @@ COMMANDS = [
     ("claude", "", "send everything to Claude"),
     ("codex", "", "send everything to Codex"),
     ("effort", "auto|low|medium|high|xhigh", "force one reasoning level for every step"),
-    ("mode", "ask|auto|unrestricted", "ask: you approve everything · auto: rules + gatekeeper · unrestricted"),
+    ("copy", "[last]", "select and copy from the conversation (F8); /copy last copies the newest reply"),
+    ("attach", "path", "attach a local file or image to your next message"),
+    ("detach", "number", "remove an attachment from your draft"),
+    ("mouse", "", "switch between selecting text and clicking controls (F6)"),
+    ("links", "", "choose a conversation link to open in your browser"),
+    ("setup", "", "project setup: instructions, permissions and models"),
+    ("mode", "[ask|auto|unrestricted]", "ask: you approve everything · auto: rules + gatekeeper · unrestricted"),
     ("checks", "full|reviews|off", "second opinions + reviews / reviews only / none"),
     ("retry", "", "send your last request again (after a stop, or a fix)"),
     ("dry", "", "plan only: show who'd do what, change nothing (toggle)"),
@@ -26,13 +32,15 @@ COMMANDS = [
     ("log", "", "recent steps in this project"),
     ("memory", "", "this project's memory: files, map, decisions, recent jobs"),
     ("shared", "", "what Claude and Codex share (house rules, skills, connectors) and what they don't"),
+    ("todo", "text", "add a personal task to the left checklist (this screen only)"),
+    ("done", "number", "tick or untick a personal task"),
     ("permissions", "", "the permission rules in force and every recent decision"),
     ("init", "", "set this project up: one house-rules file for both agents, memory, first map"),
     ("usage", "web", "tokens across Claude and Codex as a coloured chart; /usage web opens a live page"),
     ("quit", "", "leave Claudex"),
 ]
 TERMINAL_ONLY = {"auto", "claude", "codex", "effort", "mode", "checks", "dry", "quit", "anim", "retry", "resume",
-                 "settings"}
+                 "settings", "todo", "done", "setup", "mouse", "links", "attach", "detach", "copy"}
 
 
 def _describe(skill_md):

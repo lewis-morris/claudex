@@ -13,6 +13,7 @@ import glob
 import http.server
 import json
 import os
+import tempfile
 import pathlib
 import socketserver
 import threading
@@ -176,12 +177,15 @@ PROJECTS = DATA / "projects.json"
 
 
 def remember_project(root):
+    """Add a project to the list `claudex usage` reads, dropping throwaway temp folders that have gone.
+    Nothing else is ever dropped: a project on a drive that isn't mounted right now is still a project."""
+    tmp = tuple({os.path.join(os.path.realpath(t), "") for t in (tempfile.gettempdir(), "/tmp", "/var/tmp")})
     try:
         known = set(json.loads(PROJECTS.read_text())) if PROJECTS.exists() else set()
-        if str(root) not in known:
-            known.add(str(root))
-            DATA.mkdir(parents=True, exist_ok=True)
-            PROJECTS.write_text(json.dumps(sorted(known)))
+        live = {r for r in known if not os.path.join(r, "").startswith(tmp) or os.path.isdir(r)} | {str(root)}
+        if live != known:
+            PROJECTS.parent.mkdir(parents=True, exist_ok=True)
+            PROJECTS.write_text(json.dumps(sorted(live)))
     except Exception:
         pass
 

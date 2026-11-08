@@ -8,6 +8,13 @@
 agent = "claude"
 model = "opus"
 effort = "high"
+replan_effort = "medium"   # revising a plan after a second opinion's concerns: the first plan did the
+                           # hard thinking (high took about as long as the first plan, ~90 s, for one fix)
+quick_followups = true    # a short reply ("carry on", "1", "A is fine", "???") goes straight back to the worker who
+                          # did the last step, without planning again; false sends everything to the lead
+quick_followup_hours = 12 # only when that last step was this recent
+quick_questions = true    # a short plain question ("what's left?", "why did it stop?") goes to the worker already in
+                          # the conversation without planning; one that asks for a change is still planned
 
 [reviewers]
 # Each side checks the other's work and gives second opinions on the other's big decisions
@@ -23,21 +30,34 @@ diff_limit = 60000        # characters of diff sent to the reviewer (it's told i
 light_for_docs = true     # a step that only changed writing (.md, .txt, docs) gets a quicker, cheaper check
 # Who does that lighter check (the other side from the worker, as always). Code always gets the full reviewers.
 light = { claude = { model = "sonnet", effort = "medium" }, codex = { model = "gpt-6.1-sol", effort = "medium" } }
+small_diff = 8000         # a change this small (and 3 files or fewer) gets the same reviewer at small_effort;
+small_effort = "medium"   # re-checks after a fix always get the full effort. 0 turns this off
+recheck_fixes_only = true # a re-check after fixes is sent only the fixes (it saw the whole step last time)
 
 [checks]
 if_unavailable = "stop"   # if a review/second opinion can't run (login, model, timeout): "stop" or "continue"
 
 [final_check]
 enabled = true            # after a job with more than one step, the lead checks the parts fit together
+diff_limit = 15000        # characters of the whole job's diff it's sent (each step's diff was reviewed in full)
+when = "mixed"            # "mixed": only when more than one agent worked, or a step wasn't cleanly reviewed; "always"
+effort = "medium"         # every step it looks at has already passed a full review; "" uses the lead's own effort
 
 [memory]
 update_map = true         # refresh .claudex/project/map.md after a job that changed files
+map_when = "structural"   # "structural": only when files were added, deleted or renamed, or build/run/deploy
+                          # files changed (edits inside existing files don't change the layout); "always"
+native_instructions = true  # Claude loads CLAUDE.md and Codex loads AGENTS.md themselves, so each is sent only
+                            # the other's file; false pastes both into every prompt
 map_model = { agent = "codex", model = "gpt-6.1-sol", effort = "low" }
 
 [limits]
 plan_timeout_min = 10
 check_timeout_min = 15
-step_timeout_min = 60
+step_timeout_min = 180     # a last backstop: a worker still busy after this long is stopped anyway
+step_idle_min = 20         # a worker that shows no sign of work for this long is stopped (it's stuck)
+step_idle_tool_min = 60    # ... allowed this long when one of its actions (a build, a test run) is still running
+fresh_worker_at = 0.7     # a worker whose conversation is this full starts the next step fresh (0 = never)
 usage_limit_wait_min = 30   # after an agent hits its usage limit, route around it for this long
 
 [ladder]
@@ -162,4 +182,16 @@ allow = [
     "run:git branch -v*", "run:git branch --list*", "run:git add *",
     "run:ls*", "run:cat *", "run:head *", "run:tail *", "run:wc *", "run:grep *", "run:rg *",
     "run:pwd", "run:echo *", "run:which *", "run:python3 --version", "run:node --version",
+    # The separate test browser (Playwright): looking at pages and using them like a person would. Running
+    # scripts in a page and uploading files still go to the gatekeeper.
+    "other:*playwright*browser_snapshot*", "other:*playwright*browser_take_screenshot*",
+    "other:*playwright*browser_navigate*", "other:*playwright*browser_click*", "other:*playwright*browser_type*",
+    "other:*playwright*browser_hover*", "other:*playwright*browser_press_key*", "other:*playwright*browser_wait_for*",
+    "other:*playwright*browser_select_option*", "other:*playwright*browser_resize*", "other:*playwright*browser_tabs*",
+    "other:*playwright*browser_console_messages*", "other:*playwright*browser_network_requests*",
+    "other:*playwright*browser_fill_form*", "other:*playwright*browser_find*", "other:*playwright*browser_close*",
+    # Your signed-in Chrome: only looking. A click there can do something real in your accounts, so the
+    # gatekeeper decides those.
+    "other:*chrome-devtools*take_snapshot*", "other:*chrome-devtools*take_screenshot*",
+    "other:*chrome-devtools*list_*", "other:*chrome-devtools*get_*",
 ]
