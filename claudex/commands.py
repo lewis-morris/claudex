@@ -13,7 +13,7 @@ COMMANDS = [
     ("claude", "", "send everything to Claude"),
     ("codex", "", "send everything to Codex"),
     ("effort", "auto|low|medium|high|xhigh", "force one reasoning level for every step"),
-    ("copy", "", "freeze the transcript for selecting and copying while agents work (F8)"),
+    ("copy", "[last]", "select and copy from the conversation (F8); /copy last copies the newest reply"),
     ("attach", "path", "attach a local file or image to your next message"),
     ("detach", "number", "remove an attachment from your draft"),
     ("mouse", "", "switch between selecting text and clicking controls (F6)"),

@@ -157,18 +157,26 @@ a terminal cannot receive arbitrary desktop drag data directly.
 
 ## Selecting text and opening links
 
-For reliable copying while output is streaming, press **F8** (or type `/copy`). This opens a frozen,
-full-width transcript: drag to select and use your terminal's copy shortcut (often Ctrl+Shift+C).
-PgUp/PgDn scroll it; **F8** or **Escape** returns to the live conversation. Agents keep running,
-incoming output is retained, and your draft stays intact. The frozen view does not repaint for new
-tokens or animations, so they cannot clear the terminal's selection. Ctrl+C in this view does not stop
-the job. Close open menus or setup dialogs before entering copy view.
+Press **F8** (or type `/copy`) to select and copy. This opens a frozen, full-width copy of the
+conversation where Claudex does the selecting itself, so it works in any terminal and past the edge of
+the screen: drag to select, and letting go copies it. Shift+arrows select by keyboard, Ctrl+A selects
+everything, and Enter, Y or Ctrl+C copies. The top line confirms each copy ("Copied 3 lines"). Esc
+clears the selection, then returns to the live conversation. Agents keep running, new output is kept,
+and your draft stays intact. Ctrl+C in this view never stops the job. `/copy last` copies the newest
+reply without opening the view.
+
+Copies go to your desktop clipboard through `wl-copy` (Wayland) or `xclip`/`xsel` (X11). Without one of
+those, Claudex asks the terminal to copy instead, which also works over SSH in terminals that support it.
 
 Native selection is also available in the live view, but ongoing redraws may clear it.
 **F6** or `/mouse` switches between native selection and clickable controls;
 the preference is remembered. Dialogs and menus temporarily enable mouse controls while open.
 With mouse controls enabled, click a web address to open it. `/links` offers the same links in a
-keyboard-accessible picker. PgUp/PgDn scroll the conversation in either mode.
+keyboard-accessible picker.
+
+**Scrolling:** the mouse wheel, PgUp/PgDn, and Up/Down at the edge of an empty or one-line draft
+scroll the conversation, in either mode. While you're reading back, new output doesn't move the view, and
+the status line says so; scroll down to the end, or press Ctrl+End, to follow the newest line again.
 
 ## Your checklist
 
@@ -275,6 +283,7 @@ claudex doctor [--live]      logins, versions, connectors, every model in the ru
 claudex models [--edit] [--global]   who does what, and where it comes from (models.md)
 claudex rules [--edit]       the full rules file (--edit makes your own copy and opens it)
 claudex log [-n N]           recent steps in this project
+claudex trace [-n N]         how recent jobs ran: time, tokens and cost per role, each step, and what to improve
 claudex update               update Claude, Codex and both connectors, then run doctor
 claudex init                 one house-rules file for both agents, memory, project rules, first map
 claudex shared [--link-skills]   what both agents share (house rules, skills, connectors)
@@ -343,6 +352,13 @@ The defaults (from [`claudex/rules.toml`](claudex/rules.toml)):
 When a review keeps failing, the worker steps up a ladder (Sol low → medium → high → Astra high → xhigh;
 Sonnet medium → high → Opus medium → high → xhigh). Never Max.
 
+**Short replies skip planning.** "carry on", "1", "1A, 2B", "A is fine yes" or "???" go straight back to the
+worker who did the last step (it already has the whole conversation), and the change is still checked. A
+fuller message gets a fresh plan from the lead. `[lead] quick_followups = false` turns this off. Short plain
+questions ("what's left to do?", "why did it stop?", "are we done?") go to that worker too, to answer without
+changing anything; a question that asks for a change ("should we remove…", "can you…") is planned as usual
+(`[lead] quick_questions = false` turns this off).
+
 ## The shared memory
 
 Everything lives in `.claudex/` at the top of your repo (kept out of git automatically):
@@ -353,6 +369,8 @@ Everything lives in `.claudex/` at the top of your repo (kept out of git automat
 | `project/decisions.md` | big decisions, second opinions, and the lead's answer to each concern |
 | `project/journal.md` | every job from every session: who did what, handovers, what the checks found |
 | `sessions/<id>/notes.md` | this session's requests, handovers and reviews (long handovers saved whole) |
+| `sessions/<id>/said.jsonl` | every message you sent in this conversation, so your answers are never buried under long replies (the newest 40,000 characters are always sent) |
+| `trace.jsonl` | how each job ran: time, tokens and cost per role, each step's numbers (`claudex trace`) |
 | `sessions/<id>/steps.jsonl` | agent, model, reasoning, time and verdict for every step |
 | `permissions.jsonl` | every permission decision: what, who decided (rule, gatekeeper, you), why |
 | `rules.toml` | this project's own rules, layered over yours (made by `claudex init`) |
@@ -364,13 +382,15 @@ both). What else each role gets:
 
 | Role | Memory it gets |
 |---|---|
-| Lead, workers | rules, map, decisions, recent jobs, this session's earlier notes, this job so far |
-| Second opinion, reviewers, final check | rules, map, decisions, this job so far |
+| Lead, workers | rules, map, decisions, recent jobs, this session's earlier notes, everything you've said in this conversation, this job so far |
+| Second opinion, reviewers | rules, map, decisions, everything you've said in this conversation, this job so far |
+| Final check (medium effort: every step it looks at has passed a full review) | rules, decisions, this job so far |
 | Map writer | the current map, this job's handovers and which files were added, changed or deleted |
 
 A worker keeps one conversation across steps and jobs, so a part it has already been sent unchanged is named
 rather than pasted again; if its conversation is new or has been squashed, it gets everything again. A
-re-check lists what the reviewer asked for last time. Diffs for review keep each file's patch whole: lockfiles
+re-check lists what the reviewer asked for last time and is sent only the fixes made since (the whole step's
+file list still comes with it). Diffs for review keep each file's patch whole: lockfiles
 and generated files appear in the summary only, and a file that doesn't fit is named for the reviewer to read.
 The gatekeeper answers each action once per job. A test (`test_everyone_shares_one_memory`) proves it across
 two sessions.
@@ -395,6 +415,22 @@ claudex = "claudex --acp"
 ```
 
 Pick **claudex** for a new session: you get Routing, Effort, Mode and Checks pickers, and the same `/` menu.
+
+Agents of Empires cancels a turn when an agent shows nothing for two minutes. Planning and checking stream
+nothing until they answer, so Claudex shows each one as running work ("Planning (Claude opus)") and sends a
+short "Still working…" note every 30 seconds while it's quiet.
+
+**Adding to a job that's running.** Press Enter to send a message straight into the running job: the worker
+that's busy gets it at once (Claude and Codex both take messages mid-turn), or, if Claudex is planning or
+checking, the next worker gets it and the reviewer sees it too. If the job ends before any worker took it, it
+runs as its own message straight after. Press Tab to queue a message for after the job instead (Agents of
+Empires holds it and sends it when the job ends).
+
+**Long steps.** A worker that's busy is left to finish, however long that takes. Claudex stops a worker only
+when it's stuck: nothing at all for 20 minutes (60 if one of its actions, such as a build or a test run, is
+still going), or still busy after 3 hours as a last backstop (`[limits]` in the rules). A stopped worker's
+conversation is kept: say "carry on" and it picks up where it stopped, and the check after that step covers
+what it changed before it was stopped too.
 
 New sessions always run the Claudex you have now. A session that was already open when Claudex changed says
 so before its next job, and `claudex doctor` lists any such sessions with the command to restart each

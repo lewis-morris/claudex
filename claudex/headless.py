@@ -4,6 +4,7 @@ Used for the lead's plan, second opinions, step reviews, the final check and the
 Both are isolated from your add-ons: no MCP servers, no hooks, no Chrome, read-only tools only.
 """
 import asyncio
+import contextvars
 import json
 import os
 import tempfile
@@ -14,6 +15,11 @@ import time
 from . import usage as usage_log
 from .limits import error_is_limit
 from .paths import tool_env
+
+
+# What the last call in this task used (tokens, cost), for the run trace. A contextvar, so a call's numbers
+# are only ever seen by the code that made it.
+LAST = contextvars.ContextVar("claudex_headless_last", default=None)
 
 
 class HeadlessError(Exception):
@@ -80,10 +86,11 @@ async def claude_json(cwd, prompt, schema, model, effort, timeout=900, read_file
     except Exception:
         raise HeadlessError(f"claude exited {code}: {(err or out)[-600:]}")
     u = data.get("usage") or {}
-    usage_log.record("claude", model, role or "one-shot", cwd,
-                     fresh=(u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
-                     cached=u.get("cache_read_input_tokens") or 0, output=u.get("output_tokens") or 0,
-                     cost=data.get("total_cost_usd"), secs=round(time.time() - started, 1))
+    used = dict(fresh=(u.get("input_tokens") or 0) + (u.get("cache_creation_input_tokens") or 0),
+                cached=u.get("cache_read_input_tokens") or 0, output=u.get("output_tokens") or 0,
+                cost=data.get("total_cost_usd"))
+    LAST.set(used)
+    usage_log.record("claude", model, role or "one-shot", cwd, **used, secs=round(time.time() - started, 1))
     if code != 0 or data.get("is_error") or "structured_output" not in data:
         # keep every bit of explanation: errors[] often holds the real reason (e.g. a usage limit)
         parts = [str(data.get("result") or ""), str(data.get("subtype") or "")]
@@ -102,6 +109,7 @@ async def codex_json(cwd, prompt, schema, model, effort, timeout=900, role=None)
         code, out, err = await _run(codex_cmd(model, effort, sp, op, cwd), cwd, prompt, timeout)
         used = re.findall(r"tokens used\s*\n?\s*([\d,]+)", out + "\n" + err)
         if used:
+            LAST.set({"total": int(used[-1].replace(",", ""))})
             usage_log.record("codex", model, role or "one-shot", cwd, total=int(used[-1].replace(",", "")),
                              secs=round(time.time() - started, 1))
         if code != 0:   # never trust an answer from a run that failed
@@ -114,6 +122,7 @@ async def codex_json(cwd, prompt, schema, model, effort, timeout=900, role=None)
 
 
 async def ask(agent, cwd, prompt, schema, model, effort, timeout=900, read_files=True, role=None):
+    LAST.set(None)
     schema = strict(schema)
     if agent == "codex":
         return await codex_json(cwd, prompt, schema, model, effort, timeout, role=role)

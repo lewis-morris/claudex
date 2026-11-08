@@ -320,9 +320,18 @@ is no inline image preview, and files are not sent until you submit the message.
 
 ## Copying during live output
 
-Press F8 or type `/copy` to open a frozen, full-width transcript. Select text with the mouse and use
-your terminal's copy shortcut (usually Ctrl+Shift+C). PgUp/PgDn scroll; F8 or Escape returns to live
-output. New output is retained and agents continue working in the background. The copy view stops
-streaming and animation redraws without stopping the job, and preserves your draft. Ctrl+C does
-not stop the agent while copy view is open. Native selection in the live view can still be cleared
-by terminal redraws; use F8 when output is arriving.
+Press F8 or type `/copy` to open a frozen, full-width copy of the conversation. Drag to select: letting
+go copies it to your clipboard, and the top line says "Copied …". Shift+arrows and Ctrl+A select by
+keyboard; Enter, Y or Ctrl+C copies. Esc clears the selection, then returns to live output. Agents keep
+working and your draft is kept. `/copy last` copies the newest reply straight away.
+
+The mouse wheel and PgUp/PgDn scroll the conversation in either mouse mode. While you read back, new
+output doesn't move the view; Ctrl+End jumps back to the newest line.
+
+## Seeing how a job ran
+
+`claudex trace` shows the last few jobs in this project: how long each role took, how big its prompts
+were, tokens and cost, every step's verdict and how full the worker's context got, and who answered each
+permission. It ends with pointers to what looks worth improving (many review rounds, a busy gatekeeper,
+diffs too big to review whole, a role taking most of the time). The raw trace is
+`.claudex/trace.jsonl`; it records sizes and names, never file contents.

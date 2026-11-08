@@ -13,6 +13,7 @@ against each path for file kinds. `edit:@project` / `read:@project` match only p
 """
 import datetime
 import fnmatch
+import re
 import json
 import os
 import pathlib
@@ -160,7 +161,7 @@ def _inside(path, root):
         return False
 
 
-def matches(pattern, kind, command, paths, project_root):
+def matches(pattern, kind, command, paths, project_root, title=""):
     pk, _, glob = pattern.partition(":")
     pk = KIND_ALIASES.get(pk.lower(), pk.lower())
     if pk not in ("*", kind):
@@ -172,6 +173,8 @@ def matches(pattern, kind, command, paths, project_root):
         return any(not _inside(p, project_root) for p in paths)
     glob = glob.replace("~", str(pathlib.Path.home()))
     targets = ([command] if command else []) + paths
+    if kind == "other" and title:          # a connector's tool (a browser click) is known only by its name
+        targets.append(title)
     if not targets:
         return glob == "*"
     return any(fnmatch.fnmatch(t.lower(), glob.lower()) for t in targets)
@@ -193,7 +196,16 @@ def installs_setting(perms):
     return v if v in ("project", "ask") else "ask"
 
 
-def rule_decision(rules, kind, command, paths, project_root, extra_protected=()):
+HEREDOC = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_]\w*)\1[^\n]*\n.*?^\s*\2\s*$", re.S | re.M)
+
+
+def without_heredocs(command):
+    """The command with the text inside its heredocs taken out (the `<<'EOF'` marker stays), so a word in
+    a file being written ("release notes") isn't mistaken for what the command does."""
+    return HEREDOC.sub(lambda m: m.group(0).split("\n", 1)[0], command or "")
+
+
+def rule_decision(rules, kind, command, paths, project_root, extra_protected=(), title=""):
     """("deny"|"ask"|"allow", pattern) for the first matching rule, deny first; (None, None) if none match."""
     perms = rules.get("permissions", {})
     if kind in ("edit", "delete", "move", "run") and protected(paths, command, project_root, extra_protected):
@@ -204,7 +216,10 @@ def rule_decision(rules, kind, command, paths, project_root, extra_protected=())
         for pattern in lists[decision]:
             if decision == "allow" and unvouchable:
                 continue          # chained or risky flags: an allow rule can't vouch for it; the gatekeeper looks
-            if matches(pattern, kind, command, paths, project_root):
+            if matches(pattern, kind, command, paths, project_root, title):
+                if (decision == "ask" and kind == "run" and "<<" in command
+                        and not matches(pattern, kind, without_heredocs(command), paths, project_root)):
+                    continue      # only the heredoc's text matched ("publish" in a doc): the gatekeeper reads it
                 return decision, pattern
     return None, None
 

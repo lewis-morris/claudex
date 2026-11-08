@@ -137,3 +137,38 @@ async def clipboard():
         if mime in types:
             return mime, await get(mime)
     raise ValueError('No supported image, files or text found on the clipboard.')
+
+
+def copy_commands():
+    """The desktop's own clipboard tools that can take text, best first."""
+    out = []
+    if os.environ.get('WAYLAND_DISPLAY') and shutil.which('wl-copy'):
+        out.append(['wl-copy'])
+    if os.environ.get('DISPLAY'):
+        if shutil.which('xclip'):
+            out.append(['xclip', '-selection', 'clipboard', '-in'])
+        if shutil.which('xsel'):
+            out.append(['xsel', '--clipboard', '--input'])
+    return out
+
+
+async def copy_text(text):
+    """Put text on the desktop clipboard. Returns the tool's name, or None when no tool worked (the screen
+    then asks the terminal to do it instead)."""
+    for command in copy_commands():
+        try:
+            proc = await asyncio.create_subprocess_exec(*command, stdin=asyncio.subprocess.PIPE,
+                                                        stdout=asyncio.subprocess.DEVNULL,
+                                                        stderr=asyncio.subprocess.DEVNULL, start_new_session=True)
+            await asyncio.wait_for(proc.communicate(text.encode('utf-8', 'replace')), 4)
+            if proc.returncode == 0:
+                return command[0]
+        except Exception:
+            continue
+    return None
+
+
+def osc52(text):
+    """The escape sequence that asks the terminal itself to put text on the clipboard (works over SSH too)."""
+    import base64
+    return '\x1b]52;c;' + base64.b64encode(text.encode('utf-8', 'replace')).decode('ascii') + '\x07'

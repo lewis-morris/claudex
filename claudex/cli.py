@@ -14,7 +14,7 @@ from .engine import CHECKS, EFFORTS, MODES, ROUTES, Engine
 TTY = sys.stdout.isatty()
 DIM, BOLD, GREEN, RED, CYAN, MAGENTA, RESET = (("\033[2m", "\033[1m", "\033[32m", "\033[31m", "\033[36m",
                                                 "\033[35m", "\033[0m") if TTY else ("",) * 7)
-ARG_CHOICES = {"effort": EFFORTS, "mode": list(MODES), "checks": list(CHECKS)}
+ARG_CHOICES = {"effort": EFFORTS, "mode": list(MODES), "checks": list(CHECKS), "copy": ["last"]}
 ANIM_CHOICES = ["playful", "calm", "off", "big", "small", "tiny"]
 HISTORY = pathlib.Path.home() / ".cache/claudex/history"
 

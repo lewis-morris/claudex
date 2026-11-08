@@ -363,6 +363,8 @@ class TUI:
         self.confetti = []
         self.copy_mode = False
         self.copy_view = None
+        self.copy_note = ""         # "Copied 12 lines" in the copy view's top line
+        self.copy_task = None
         self.scroll_back = 0
         self.attachments = []
         self.clipboard_task = None
@@ -918,7 +920,31 @@ class TUI:
 
     def cursor(self):
         lines = sum(t.count("\n") for _, t in self.transcript())
+        grown = lines - getattr(self, "_lines_seen", lines)
+        self._lines_seen = lines
+        if self.scroll_back and grown > 0:
+            self.scroll_back += grown          # reading back: new text arriving doesn't move what you're reading
+        self.scroll_back = min(self.scroll_back, max(0, lines - 1))   # never further back than the start
         return Point(0, max(0, lines - self.scroll_back))
+
+    def scroll(self, lines):
+        """Read back through the conversation (positive) or forward towards the newest line (negative).
+        Where the view is comes from scroll_back alone, so a redraw never snaps it back to the bottom."""
+        total = sum(t.count("\n") for _, t in self.transcript())
+        info = self.chat.render_info if self.chat else None
+        if info is not None:
+            # The window only moves far enough to keep its (hidden) cursor in view, so put the cursor just past
+            # the edge being scrolled towards: every turn of the wheel then moves the view.
+            if lines > 0:
+                target = info.first_visible_line() - lines
+            else:
+                target = info.last_visible_line() - lines
+            self.scroll_back = total - max(0, target)
+        else:
+            self.scroll_back += lines
+        self.scroll_back = max(0, min(self.scroll_back, max(0, total - 1)))
+        self._lines_seen = total     # already counted from the newest line: don't add new arrivals twice
+        self._refresh()
 
     def needs_action(self, text):
         if text and not any(t["text"] == text and not t["done"] for t in self.todos):
@@ -1006,6 +1032,8 @@ class TUI:
             left = f" {spin} {who} is working · {secs // 60}:{secs % 60:02d}{acts}{now} · no input needed · Ctrl-C stops "
         else:
             left = " Ready "
+        if self.scroll_back:
+            left += " · ↑ reading back: wheel down, PgDn or Ctrl+End returns "
         right = (f" {ROUTES[e.route]} · effort {e.effort} · checks {CHECKS[e.checks]}"
                  + (" · PLAN ONLY" if e.dry_run else "")
                  + " · /settings · F2 animation · F6 " + ("mouse controls" if self.prefs["mouse"] else "text selection") + " ")
@@ -1021,7 +1049,8 @@ class TUI:
                               completer=self._completer, complete_while_typing=True,
                               accept_handler=self.on_accept, style="class:input")
         self.stage = Window(StageControl(self), height=lambda: STAGE_ROWS[self.prefs["size"]], style="class:bg")
-        self.chat = Window(FormattedTextControl(self.clickable_transcript, get_cursor_position=self.cursor, show_cursor=False),
+        self.chat = Window(ChatControl(self, self.clickable_transcript, get_cursor_position=self.cursor,
+                                       show_cursor=False),
                            wrap_lines=True, style="class:panel")
         self.plan_win = Window(FormattedTextControl(self.plan_text), wrap_lines=True, style="class:panel")
 
@@ -1064,10 +1093,24 @@ class TUI:
                                                 filter=Condition(lambda: self.setup_dialog is not None)))])
         live_root = root
         self.copy_view = TextArea(read_only=True, wrap_lines=True, scrollbar=True, style="class:panel")
+        control = self.copy_view.control
+        drag = control.mouse_handler
+
+        def select_and_copy(mouse_event):
+            # Claudex does the selecting itself here, so it works in any terminal, past the edge of the screen,
+            # and copies exactly the text (no padding, no broken lines). Letting go of the mouse copies it.
+            result = drag(mouse_event)
+            if mouse_event.event_type == MouseEventType.MOUSE_UP and self.copy_view.buffer.selection_state:
+                self.copy_selection()
+            return result
+        control.mouse_handler = select_and_copy
         copy_root = HSplit([
-            Window(FormattedTextControl(" COPY VIEW — frozen; agents keep working"), height=1, style="class:chip"),
+            Window(FormattedTextControl(lambda: " COPY VIEW — frozen; agents keep working"
+                                        + (f" · {self.copy_note}" if self.copy_note else "")),
+                   height=1, style="class:chip"),
             self.copy_view,
-            Window(FormattedTextControl(" Drag to select · Ctrl+Shift+C copies · PgUp/PgDn scroll · F8/Esc returns"),
+            Window(FormattedTextControl(" Drag to select: letting go copies it · Shift+arrows select · Ctrl+A all"
+                                        " · Enter or Y copies · wheel/PgUp scroll · Esc returns"),
                    height=1, style="class:status"),
         ])
         root = DynamicContainer(lambda: copy_root if self.copy_mode else live_root)
@@ -1080,7 +1123,31 @@ class TUI:
 
         @kb.add("escape", filter=copying, eager=True)
         def _(event):
-            self.toggle_copy_view()
+            if self.copy_view.buffer.selection_state:   # first Esc drops the selection, the next one leaves
+                self.copy_view.buffer.exit_selection()
+            else:
+                self.toggle_copy_view()
+
+        for key in ("enter", "y", "c-y"):
+            @kb.add(key, filter=copying, eager=True)
+            def _(event):
+                self.copy_selection()
+
+        @kb.add("c-a", filter=copying, eager=True)
+        def _(event):
+            buf = self.copy_view.buffer
+            buf.cursor_position = 0
+            buf.start_selection()
+            buf.cursor_position = len(buf.text)
+
+        for key, move in (("s-up", "up"), ("s-down", "down"), ("s-left", "left"), ("s-right", "right")):
+            @kb.add(key, filter=copying, eager=True)
+            def _(event, move=move):
+                buf = self.copy_view.buffer
+                if not buf.selection_state:
+                    buf.start_selection()
+                {"up": buf.cursor_up, "down": buf.cursor_down,
+                 "left": buf.cursor_left, "right": buf.cursor_right}[move]()
 
         composing = has_focus(self.input) & Condition(lambda: not self.copy_mode and self.setup_dialog is None and self.picker is None)
 
@@ -1145,8 +1212,10 @@ class TUI:
         def _(event):
             # Like Claude Code: Ctrl-C clears what you typed or stops the job; with nothing to clear or stop,
             # it asks once, and a second Ctrl-C within two seconds quits.
-            if self.copy_mode:
-                return  # copying must never interrupt the worker or discard its draft
+            if self.copy_mode:   # copying must never interrupt the worker or discard its draft
+                if self.copy_view.buffer.selection_state:
+                    self.copy_selection()      # Ctrl-C copies, as it does in most programs
+                return
             if self.setup_dialog is not None:
                 self.close_setup()
                 return
@@ -1221,25 +1290,46 @@ class TUI:
             self.prefs["palette"] = names[(names.index(self.prefs["palette"]) + 1) % len(names)]
             self._save_prefs()
 
+        # The wheel: with mouse controls on, the conversation gets the scroll itself (ChatControl). With them
+        # off, most terminals turn the wheel into Up/Down presses; at the edge of your draft those scroll the
+        # conversation too, instead of doing nothing (or moving a highlighted answer).
+        from prompt_toolkit.filters import has_completions
+        at_top = Condition(lambda: self.input.document.cursor_position_row == 0)
+        at_bottom = Condition(lambda: self.input.document.cursor_position_row >= self.input.document.line_count - 1)
+        idle_arrows = composing & ~has_completions & ~waiting
+
+        @kb.add("up", filter=idle_arrows & at_top)
+        def _(event):
+            self.scroll(3)
+
+        @kb.add("down", filter=idle_arrows & at_bottom)
+        def _(event):
+            self.scroll(-3)
+
+        @kb.add("c-end", filter=~copying)
+        def _(event):
+            self.scroll_back = 0
+            self._refresh()
+
         @kb.add("pageup")
         def _(event):
             if self.copy_mode:
                 self.copy_view.buffer.cursor_up(count=12)
             else:
-                self.scroll_back += 12
+                self.scroll(max(3, (self.chat.render_info.window_height - 2) if self.chat.render_info else 12))
 
         @kb.add("pagedown")
         def _(event):
             if self.copy_mode:
                 self.copy_view.buffer.cursor_down(count=12)
             else:
-                self.scroll_back = max(0, self.scroll_back - 12)
+                self.scroll(-max(3, (self.chat.render_info.window_height - 2) if self.chat.render_info else 12))
 
         from prompt_toolkit.output import ColorDepth
         depth = ColorDepth.TRUE_COLOR if os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit") \
             or os.environ.get("CLAUDEX_TRUECOLOR") else None
         self.app = Application(layout=Layout(root, focused_element=self.input), key_bindings=kb, full_screen=True,
-                               style=DynamicStyle(self.style), mouse_support=Condition(lambda: not self.copy_mode and (self.prefs["mouse"] or self.setup_dialog is not None or self.picker is not None)), color_depth=depth)
+                               style=DynamicStyle(self.style), mouse_support=Condition(lambda: self.copy_mode or self.prefs["mouse"] or self.setup_dialog is not None or self.picker is not None or bool(self.questions)), color_depth=depth)
         return self.app
 
     def style(self):
@@ -1321,6 +1411,13 @@ class TUI:
         single_line = "\n" not in line
         if line == "/copy":
             self.toggle_copy_view()
+            return False
+        if line == "/copy last":
+            reply = self.last_reply()
+            if reply:
+                self.copy_out(reply, "the last reply")
+            else:
+                self._add("sys", "\n_There's no reply to copy yet._\n")
             return False
         if single_line and (line == "/attach" or line.startswith("/attach ")):
             paths = attachments.paths_in(line[7:].strip(), self.eng.cwd, only=True)
@@ -1566,6 +1663,7 @@ class TUI:
             return
         if self.setup_dialog is not None or self.picker is not None:
             return  # finish the dialog first; never replace a live form beneath its focus
+        self.copy_note = ""
         text = "".join(fragment[1] for fragment in self.transcript())
         self.copy_view.buffer.set_document(Document(text, cursor_position=len(text)), bypass_readonly=True)
         if self.scroll_back:
@@ -1573,6 +1671,48 @@ class TUI:
         self.copy_mode = True
         self.app.layout.focus(self.copy_view)
         self.app.invalidate()  # one redraw to enter; incoming events cannot redraw the frozen view
+
+    def copy_selection(self):
+        """Copy the copy view's selection to the clipboard (and keep the selection visible)."""
+        buf = self.copy_view.buffer
+        if not buf.selection_state:
+            self.copy_note = "select something first: drag, Shift+arrows or Ctrl+A"
+            self.app.invalidate()
+            return
+        start, end = buf.document.selection_range()
+        self.copy_out(buf.text[start:end])
+
+    def copy_out(self, text, what=None):
+        """Put text on the clipboard: the desktop's own tool if there is one, else ask the terminal."""
+        lines = text.count("\n") + 1
+        label = what or (f"{lines} lines" if lines > 1 else f"{len(text)} characters")
+
+        async def go():
+            how = await attachments.copy_text(text)
+            if not how:
+                try:
+                    self.app.output.write_raw(attachments.osc52(text))
+                    self.app.output.flush()
+                    how = "the terminal"
+                except Exception:
+                    how = None
+            self.copy_note = (f"Copied {label}" if how and how != "the terminal" else
+                              f"Asked the terminal to copy {label}" if how else
+                              "couldn't reach the clipboard: install wl-clipboard (Wayland) or xclip (X11)")
+            if self.copy_mode:
+                self.app.invalidate()
+            else:
+                self._add("sys", f"\n_{self.copy_note}._\n")
+        if self.copy_task and not self.copy_task.done():
+            self.copy_task.cancel()
+        self.copy_task = asyncio.ensure_future(go())
+
+    def last_reply(self):
+        """The newest agent reply in the conversation, as plain text."""
+        for block in reversed(self.blocks):
+            if block.get("who") in ("claude", "codex", "lead") and block.get("text", "").strip():
+                return block["text"].strip()
+        return ""
 
     def toggle_mouse(self):
         self.prefs["mouse"] = not self.prefs["mouse"]
@@ -1784,6 +1924,23 @@ class TUI:
         while True:
             await asyncio.sleep({"playful": 0.08, "calm": 0.2, "off": 0.5}[self.prefs["style"]])
             self._refresh()
+
+
+class ChatControl(FormattedTextControl):
+    """The conversation. The mouse wheel scrolls it (a link still opens on click)."""
+
+    def __init__(self, tui, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tui = tui
+
+    def mouse_handler(self, mouse_event):
+        if mouse_event.event_type == MouseEventType.SCROLL_UP:
+            self.tui.scroll(3)
+            return None
+        if mouse_event.event_type == MouseEventType.SCROLL_DOWN:
+            self.tui.scroll(-3)
+            return None
+        return super().mouse_handler(mouse_event)
 
 
 def _blocks_from_notes(text):

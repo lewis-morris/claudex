@@ -73,7 +73,7 @@ def main():
     if argv and argv[0] == "demo":
         from . import ui_demo
         sys.exit(ui_demo.main())
-    if argv and argv[0] in ("doctor", "rules", "log", "update", "login", "init", "shared", "memory",
+    if argv and argv[0] in ("doctor", "rules", "log", "trace", "update", "login", "init", "shared", "memory",
                             "permissions", "usage", "bench", "models"):
         from . import tools
         sys.exit(tools.main(argv))
